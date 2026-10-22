@@ -22,12 +22,15 @@ export type Category = {
 
 const summary: FieldDef = { key: "summary", label: "Краткое описание", kind: "textarea" };
 
+const altTitle: FieldDef = { key: "altTitle", label: "Альтернативное название", kind: "text" };
+
 const genre: FieldDef = { key: "genre", label: "Жанр", kind: "text" };
 
 const franchise: FieldDef = { key: "franchise", label: "Франшиза", kind: "text" };
 
 const screenFields: FieldDef[] = [
   summary,
+  altTitle,
   genre,
   { key: "released", label: "Дата выхода", kind: "text" },
   { key: "country", label: "Страна", kind: "text" },
@@ -97,6 +100,7 @@ export const categories: Category[] = [
     ],
     fields: [
       summary,
+      altTitle,
       genre,
       { key: "themes", label: "Темы", kind: "text" },
       { key: "released", label: "Дата выхода", kind: "text" },
@@ -120,6 +124,7 @@ export const categories: Category[] = [
     ],
     fields: [
       summary,
+      altTitle,
       genre,
       { key: "kind", label: "Тип", kind: "text" },
       { key: "released", label: "Дата", kind: "text" },

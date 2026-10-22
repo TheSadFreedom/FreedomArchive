@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type Dispatch, type FormEvent, type SetStateAction } from "react";
+import { useEffect, useMemo, useRef, useState, type Dispatch, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type SetStateAction } from "react";
 import { deleteEntry, errorText, moveEntry, updateCard } from "../api";
 import { Cover } from "./Cover";
 import { Stars } from "./Stars";
@@ -14,6 +14,7 @@ import type { Entry } from "../types";
 
 type CardDialogProps = {
   entry: Entry;
+  entries: Entry[];
   onClose: () => void;
   onSaved: (relativePath: string) => Promise<void>;
   onDeleted: () => Promise<void>;
@@ -25,45 +26,209 @@ const hints: Record<string, string> = {
   actors: "через запятую или с новой строки",
 };
 
+const plainFields = new Set(["genre", "themes", "theme", "summary"]);
+const animeListKeys = new Set(["director", "author", "franchise", "studio", "country"]);
+
+type ListMode = "single" | "comma" | "lines";
+
+function suggestionKey(value: string): string {
+  return value.trim().toLocaleLowerCase("ru");
+}
+
+function listMode(category: string, key: string): ListMode {
+  if (key === "actors") return "lines";
+  if (category === "аниме" && animeListKeys.has(key)) return "comma";
+  return "single";
+}
+
+function tokens(raw: string, mode: Exclude<ListMode, "single">): string[] {
+  const source = mode === "lines" ? raw.split(/[\n,]/) : raw.split(",");
+  return source.map((item) => item.trim()).filter(Boolean);
+}
+
+function lastBreak(value: string, mode: Exclude<ListMode, "single">): number {
+  if (mode === "lines") return Math.max(value.lastIndexOf(","), value.lastIndexOf("\n"));
+  return value.lastIndexOf(",");
+}
+
+function sortedLabels(bucket: Map<string, { label: string; count: number }>): string[] {
+  return [...bucket.values()]
+    .sort((left, right) => right.count - left.count || left.label.localeCompare(right.label, "ru"))
+    .map((item) => item.label);
+}
+
+function suggestionsFrom(
+  entries: Entry[],
+  skipPath: string,
+): { whole: Record<string, string[]>; listed: Record<string, string[]> } {
+  const whole = new Map<string, Map<string, { label: string; count: number }>>();
+  const listed = new Map<string, Map<string, { label: string; count: number }>>();
+
+  function push(bags: Map<string, Map<string, { label: string; count: number }>>, key: string, label: string) {
+    const id = suggestionKey(label);
+    if (!id) return;
+    let bucket = bags.get(key);
+    if (!bucket) {
+      bucket = new Map();
+      bags.set(key, bucket);
+    }
+    const found = bucket.get(id);
+    if (found) found.count += 1;
+    else bucket.set(id, { label, count: 1 });
+  }
+
+  for (const item of entries) {
+    if (item.relativePath === skipPath) continue;
+    for (const [key, raw] of Object.entries(item.fields)) {
+      if (!raw?.trim() || plainFields.has(key)) continue;
+      if (key === "actors") {
+        for (const label of tokens(raw, "lines")) push(listed, key, label);
+        continue;
+      }
+      push(whole, key, raw.trim());
+      if (animeListKeys.has(key)) {
+        for (const label of tokens(raw, "comma")) push(listed, key, label);
+      }
+    }
+  }
+
+  const wholeResult: Record<string, string[]> = {};
+  const listedResult: Record<string, string[]> = {};
+  for (const [key, bucket] of whole) wholeResult[key] = sortedLabels(bucket);
+  for (const [key, bucket] of listed) listedResult[key] = sortedLabels(bucket);
+  return { whole: wholeResult, listed: listedResult };
+}
+
+function withChoice(value: string, choice: string, mode: ListMode): string {
+  if (mode === "single") return choice;
+  const index = lastBreak(value, mode);
+  if (index === -1) return choice;
+  const head = value.slice(0, index + 1);
+  const gap = head.endsWith("\n") || head.endsWith(" ") ? "" : " ";
+  return `${head}${gap}${choice}`;
+}
+
 function FieldControl({
   field,
   fields,
   setFields,
+  options,
+  list,
 }: {
   field: FieldDef;
   fields: Record<string, string>;
   setFields: Dispatch<SetStateAction<Record<string, string>>>;
+  options: string[];
+  list: ListMode;
 }) {
-  const hint = hints[field.key];
+  const hint = hints[field.key] ?? (list === "comma" ? "через запятую" : undefined);
+  const listField = list !== "single";
+  const anchor = useRef<HTMLDivElement>(null);
+  const [open, setOpen] = useState(false);
+  const [above, setAbove] = useState(false);
+  const [active, setActive] = useState(0);
+
+  function reveal() {
+    const rect = anchor.current?.getBoundingClientRect();
+    setAbove(Boolean(rect && window.innerHeight - rect.bottom < 300));
+    setOpen(true);
+  }
+  const value = fields[field.key] ?? "";
+  const query = (listField ? value.slice(lastBreak(value, list === "lines" ? "lines" : "comma") + 1) : value).trim();
+  const needle = suggestionKey(query);
+  const taken = new Set(listField ? tokens(value, list === "lines" ? "lines" : "comma").map(suggestionKey) : []);
+  const matches = options
+    .filter((option) => {
+      const key = suggestionKey(option);
+      if (listField && !needle && taken.has(key)) return false;
+      if (!needle) return true;
+      return key.includes(needle) && key !== needle;
+    })
+    .slice(0, 8);
+
+  function choose(choice: string) {
+    setFields((currentFields) => ({
+      ...currentFields,
+      [field.key]: withChoice(currentFields[field.key] ?? "", choice, list),
+    }));
+    setOpen(false);
+  }
+
+  function onKeyDown(event: ReactKeyboardEvent<HTMLInputElement | HTMLTextAreaElement>) {
+    if (!open || matches.length === 0) return;
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      setActive((index) => (index + 1) % matches.length);
+    } else if (event.key === "ArrowUp") {
+      event.preventDefault();
+      setActive((index) => (index - 1 + matches.length) % matches.length);
+    } else if (event.key === "Enter" && matches[active]) {
+      event.preventDefault();
+      choose(matches[active]);
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      event.stopPropagation();
+      setOpen(false);
+    }
+  }
+
+  const control = field.kind === "textarea" ? (
+    <textarea
+      rows={field.key === "summary" ? 7 : 4}
+      value={value}
+      onFocus={reveal}
+      onBlur={() => setOpen(false)}
+      onKeyDown={onKeyDown}
+      onChange={(event) => {
+        setActive(0);
+        reveal();
+        setFields((currentFields) => ({ ...currentFields, [field.key]: event.target.value }));
+      }}
+    />
+  ) : (
+    <input
+      type={field.kind === "number" ? "number" : "text"}
+      value={value}
+      onFocus={reveal}
+      onBlur={() => setOpen(false)}
+      onKeyDown={onKeyDown}
+      onChange={(event) => {
+        setActive(0);
+        reveal();
+        setFields((currentFields) => ({ ...currentFields, [field.key]: event.target.value }));
+      }}
+    />
+  );
+
   return (
-    <label className={field.kind === "textarea" ? "wide" : undefined}>
+    <div className={field.kind === "textarea" ? "editor-field wide" : "editor-field"}>
       <span className="editor-label">
         {field.label}
         {hint && <span className="field-hint">{hint}</span>}
       </span>
-      {field.kind === "textarea" ? (
-        <textarea
-          rows={field.key === "summary" ? 7 : 4}
-          value={fields[field.key] ?? ""}
-          onChange={(event) =>
-            setFields((currentFields) => ({
-              ...currentFields,
-              [field.key]: event.target.value,
-            }))
-          }
-        />
-      ) : (
-        <input
-          type={field.kind === "number" ? "number" : "text"}
-          value={fields[field.key] ?? ""}
-          onChange={(event) =>
-            setFields((currentFields) => ({
-              ...currentFields,
-              [field.key]: event.target.value,
-            }))
-          }
-        />
-      )}
+      <div className={above ? "suggest above" : "suggest"} ref={anchor}>
+        {control}
+        {open && matches.length > 0 && (
+          <ul className="suggest-list" role="listbox">
+            {matches.map((option, index) => (
+              <li key={option}>
+                <button
+                  type="button"
+                  role="option"
+                  aria-selected={index === active}
+                  className={index === active ? "on" : undefined}
+                  onMouseDown={(event) => {
+                    event.preventDefault();
+                    choose(option);
+                  }}
+                >
+                  {option}
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
       {(field.key === "themes" || field.key === "theme") && (
         <span className="card-pills editor-pills">
           {(fields[field.key] ?? "")
@@ -77,11 +242,11 @@ function FieldControl({
             ))}
         </span>
       )}
-    </label>
+    </div>
   );
 }
 
-export function CardDialog({ entry, onClose, onSaved, onDeleted }: CardDialogProps) {
+export function CardDialog({ entry, entries, onClose, onSaved, onDeleted }: CardDialogProps) {
   const [title, setTitle] = useState(entry.title);
   const [category, setCategory] = useState(entry.category);
   const [subcategory, setSubcategory] = useState(entry.subcategory ?? "");
@@ -190,12 +355,18 @@ export function CardDialog({ entry, onClose, onSaved, onDeleted }: CardDialogPro
   const summary = fieldDefs.find((field) => field.key === "summary");
   const actors = fieldDefs.find((field) => field.key === "actors");
   const themes = fieldDefs.find((field) => field.key === "themes" || field.key === "theme");
+  const altTitle = fieldDefs.find((field) => field.key === "altTitle");
   const facts = fieldDefs.filter(
     (field) =>
       field.key !== "summary" &&
       field.key !== "actors" &&
       field.key !== "themes" &&
-      field.key !== "theme",
+      field.key !== "theme" &&
+      field.key !== "altTitle",
+  );
+  const known = useMemo(
+    () => suggestionsFrom(entries, entry.relativePath),
+    [entries, entry.relativePath],
   );
   const focused =
     category === "аниме" ||
@@ -261,15 +432,28 @@ export function CardDialog({ entry, onClose, onSaved, onDeleted }: CardDialogPro
         </aside>
 
         <div className="card-page-main">
-          <input
-            id="card-title"
-            className="card-name"
-            value={title}
-            onChange={(event) => setTitle(event.target.value)}
-            required
-            aria-label="Название"
-            placeholder="Название"
-          />
+          <div className="card-names">
+            <input
+              id="card-title"
+              className="card-name"
+              value={title}
+              onChange={(event) => setTitle(event.target.value)}
+              required
+              aria-label="Название"
+              placeholder="Название"
+            />
+            {altTitle && (
+              <input
+                className="card-alt"
+                value={fields.altTitle ?? ""}
+                onChange={(event) =>
+                  setFields((currentFields) => ({ ...currentFields, altTitle: event.target.value }))
+                }
+                aria-label="Альтернативное название"
+                placeholder="Альтернативное название"
+              />
+            )}
+          </div>
 
           {!focused && (
             <div className="editor-place">
@@ -301,26 +485,38 @@ export function CardDialog({ entry, onClose, onSaved, onDeleted }: CardDialogPro
           {facts.length > 0 && (
             <div className="editor-grid">
               {facts.map((field) => (
-                <FieldControl key={field.key} field={field} fields={fields} setFields={setFields} />
+                <FieldControl
+                  key={field.key}
+                  field={field}
+                  fields={fields}
+                  setFields={setFields}
+                  list={listMode(category, field.key)}
+                  options={
+                    plainFields.has(field.key)
+                      ? []
+                      : (listMode(category, field.key) === "single" ? known.whole[field.key] : known.listed[field.key]) ??
+                        []
+                  }
+                />
               ))}
             </div>
           )}
 
           {actors && (
             <section className="editor-section">
-              <FieldControl field={actors} fields={fields} setFields={setFields} />
+              <FieldControl field={actors} fields={fields} setFields={setFields} list="lines" options={known.listed.actors ?? []} />
             </section>
           )}
 
           {summary && (
             <section className="editor-section">
-              <FieldControl field={summary} fields={fields} setFields={setFields} />
+              <FieldControl field={summary} fields={fields} setFields={setFields} list="single" options={[]} />
             </section>
           )}
 
           {themes && (
             <section className="editor-section">
-              <FieldControl field={themes} fields={fields} setFields={setFields} />
+              <FieldControl field={themes} fields={fields} setFields={setFields} list="single" options={[]} />
             </section>
           )}
 

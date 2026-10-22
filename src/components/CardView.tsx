@@ -46,8 +46,14 @@ export function CardView({ entry, onClose, onEdit }: CardViewProps) {
   const themes = (entry.fields.themes || entry.fields.theme)?.trim() ?? "";
   const themeKey = entry.fields.themes?.trim() ? "themes" : "theme";
   const themeItems = themes ? orderedList(themeKey, themes) : [];
+  const altTitle = entry.fields.altTitle?.trim() ?? "";
   const rows = filled.filter(
-    (field) => field.key !== "summary" && field.key !== "actors" && field.key !== "themes" && field.key !== "theme",
+    (field) =>
+      field.key !== "summary" &&
+      field.key !== "actors" &&
+      field.key !== "themes" &&
+      field.key !== "theme" &&
+      field.key !== "altTitle",
   );
   const heading = aboutHeading(entry.category, entry.subcategory);
   const [zoomed, setZoomed] = useState(false);
@@ -109,9 +115,16 @@ export function CardView({ entry, onClose, onEdit }: CardViewProps) {
 
         <div className="card-page-main">
           <div className="card-headline">
-            <h2 id="view-title" className="card-name">
-              {displayTitle(entry.title)}
-            </h2>
+            <div className="card-names">
+              <h2 id="view-title" className="card-name">
+                {displayTitle(entry.title)}
+              </h2>
+              {altTitle && (
+                <p className="card-alt" title="Альтернативное название">
+                  {altTitle}
+                </p>
+              )}
+            </div>
             <button type="button" className="card-icon" aria-label="Изменить" onClick={onEdit}>
               <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
                 <path

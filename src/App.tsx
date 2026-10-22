@@ -239,8 +239,14 @@ export default function App() {
       .filter((entry) => {
         const shown = displayTitle(entry.title).toLocaleLowerCase("ru");
         const stored = entry.title.toLocaleLowerCase("ru");
+        const alt = (entry.fields.altTitle ?? "").toLocaleLowerCase("ru");
         const franchise = (entry.fields.franchise ?? "").toLocaleLowerCase("ru");
-        return shown.includes(homeNeedle) || stored.includes(homeNeedle) || franchise.includes(homeNeedle);
+        return (
+          shown.includes(homeNeedle) ||
+          stored.includes(homeNeedle) ||
+          alt.includes(homeNeedle) ||
+          franchise.includes(homeNeedle)
+        );
       })
       .sort((left, right) => displayTitle(left.title).localeCompare(displayTitle(right.title), "ru"));
   }, [entries, homeNeedle]);
@@ -383,6 +389,9 @@ export default function App() {
                         )}
                       </span>
                       <span className="poster-title">{displayTitle(entry.title)}</span>
+                      {entry.fields.altTitle?.trim() && (
+                        <span className="poster-alt">{entry.fields.altTitle.trim()}</span>
+                      )}
                       {place && <span className="poster-place">{place}</span>}
                     </button>
                   </li>
@@ -451,6 +460,9 @@ export default function App() {
                       )}
                     </span>
                     <span className="poster-title">{displayTitle(entry.title)}</span>
+                    {entry.fields.altTitle?.trim() && (
+                      <span className="poster-alt">{entry.fields.altTitle.trim()}</span>
+                    )}
                   </button>
                 </li>
               ))}
@@ -669,6 +681,7 @@ export default function App() {
       {selected && editing && (
         <CardDialog
           entry={selected}
+          entries={entries}
           onClose={() => setEditing(false)}
           onSaved={async (relativePath) => {
             await afterChange(relativePath);

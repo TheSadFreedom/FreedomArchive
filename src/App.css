@@ -725,12 +725,26 @@ h1 {
 .poster-title {
   display: -webkit-box;
   -webkit-box-orient: vertical;
-  -webkit-line-clamp: 3;
+  -webkit-line-clamp: 2;
   overflow: hidden;
   padding: 0.68rem 0.28rem 0.08rem;
   font-size: 0.98rem;
   font-weight: 600;
   letter-spacing: -0.03em;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+}
+
+.poster-alt {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  padding: 0.06rem 0.28rem 0.02rem;
+  color: rgba(243, 241, 236, 0.62);
+  font-size: 0.86rem;
+  font-weight: 500;
+  letter-spacing: -0.02em;
   line-height: 1.25;
   overflow-wrap: anywhere;
 }
@@ -1321,6 +1335,49 @@ h1 {
   gap: 0.35rem;
 }
 
+.card-names {
+  display: flex;
+  flex: 1;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.45rem 0.9rem;
+  min-width: 0;
+}
+
+.card-names .card-name {
+  width: auto;
+  flex: 0 1 auto;
+  max-width: 100%;
+}
+
+.card-alt {
+  margin: 0;
+  max-width: 100%;
+  color: var(--muted);
+  font-size: 1.05rem;
+  font-weight: 500;
+  letter-spacing: -0.02em;
+  line-height: 1.25;
+}
+
+.card-page:not(.editor) .card-names {
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.15rem;
+}
+
+.card-page:not(.editor) .card-alt {
+  padding: 0;
+  border-radius: 0;
+  background: none;
+  font-family: "Segoe UI Variable Display", "Segoe UI", sans-serif;
+  font-size: clamp(1.9rem, 3.2vw, 2.9rem);
+  font-weight: 520;
+  letter-spacing: -0.04em;
+  line-height: 1.05;
+  color: rgba(243, 241, 236, 0.72);
+}
+
 .card-page .card-name {
   font-size: clamp(2.5rem, 4.2vw, 3.8rem);
 }
@@ -1366,8 +1423,35 @@ h1 {
   filter: brightness(1.06);
 }
 
-.editor .card-name {
-  width: 100%;
+.editor .card-names {
+  align-items: flex-end;
+}
+
+.editor .card-names .card-name {
+  flex: 1.4 1 14rem;
+}
+
+.editor .card-alt {
+  flex: 1 1 12rem;
+  min-width: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  padding: 0 0 0.22rem;
+  font-family: "Segoe UI Variable Display", "Segoe UI", sans-serif;
+  font-size: clamp(1.2rem, 2vw, 1.7rem);
+  font-weight: 450;
+  letter-spacing: -0.03em;
+}
+
+.editor .card-alt:focus {
+  outline: none;
+  box-shadow: inset 0 -2px 0 var(--accent);
+  color: var(--text);
+}
+
+.editor .card-alt::placeholder {
+  color: rgba(243, 241, 236, 0.28);
 }
 
 .editor .card-name::placeholder {
@@ -1432,8 +1516,60 @@ h1 {
   font-size: 0.72rem;
 }
 
+.editor-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.38rem;
+  min-width: 0;
+}
+
 .editor-grid .wide {
   grid-column: 1 / -1;
+}
+
+.suggest {
+  position: relative;
+  width: 100%;
+}
+
+.suggest input,
+.suggest textarea {
+  width: 100%;
+}
+
+.suggest-list {
+  position: absolute;
+  z-index: 6;
+  left: 0;
+  right: 0;
+  top: calc(100% + 0.28rem);
+  margin: 0;
+  padding: 0.28rem;
+  list-style: none;
+  max-height: 14rem;
+  overflow: auto;
+  border-radius: 0.7rem;
+  background: #1b1c1f;
+  border: 1px solid rgba(243, 241, 236, 0.14);
+  box-shadow: 0 16px 36px rgba(0, 0, 0, 0.42);
+}
+
+.suggest-list button {
+  width: 100%;
+  padding: 0.42rem 0.6rem;
+  border-radius: 0.45rem;
+  text-align: left;
+  color: var(--text);
+}
+
+.suggest.above .suggest-list {
+  top: auto;
+  bottom: calc(100% + 0.28rem);
+}
+
+.suggest-list button.on,
+.suggest-list button:hover {
+  background: rgba(214, 255, 74, 0.14);
 }
 
 .editor input,
