@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
@@ -204,8 +205,14 @@ impl Archive {
         if paths_equal(&source_image, &dest_image) {
             return self.entry_at(&source_image);
         }
-        if dest_image.exists() || find_card(&dest_image).is_file() {
-            return Err("такая запись уже есть".into());
+        for path in [
+            dest_image.clone(),
+            json_path(&dest_image),
+            dest_image.with_extension("json"),
+        ] {
+            if path.is_file() && !paths_equal(&path, &source_image) && !paths_equal(&path, &source_meta) {
+                fs::remove_file(&path).map_err(|err| io("не удалось заменить запись", err))?;
+            }
         }
 
         fs::rename(&source_image, &dest_image).map_err(|err| io("не удалось перенести обложку", err))?;
@@ -765,7 +772,7 @@ pub fn sanitize_title(raw: &str) -> Result<String, String> {
     if title.is_empty() {
         return Err("пустое название".into());
     }
-    if title.chars().count() > 120 {
+    if title.chars().count() > 200 {
         return Err("слишком длинное название".into());
     }
     if is_reserved(&title) {
@@ -801,7 +808,10 @@ fn is_image(path: &Path) -> bool {
 }
 
 pub fn fetch_cover(url: &str) -> Result<PathBuf, String> {
-    let url = url.trim();
+    let url = url
+        .trim()
+        .trim_matches(|ch| matches!(ch, '"' | '\'' | '«' | '»' | '“' | '”'))
+        .trim();
     if url.len() > 2000 || url.chars().any(|ch| ch.is_control() || ch.is_whitespace()) {
         return Err("непонятная ссылка".into());
     }
@@ -810,18 +820,30 @@ pub fn fetch_cover(url: &str) -> Result<PathBuf, String> {
         return Err("нужна ссылка http или https".into());
     }
 
+    // native-tls is never the default in ureq — it must be set on the agent,
+    // otherwise every https:// request fails with "no TLS backend".
+    let tls = ureq::native_tls::TlsConnector::new()
+        .map_err(|err| format!("не удалось настроить HTTPS ({err})"))?;
     let agent = ureq::AgentBuilder::new()
+        .tls_connector(Arc::new(tls))
         .timeout_connect(Duration::from_secs(15))
         .timeout_read(Duration::from_secs(45))
-        .redirects(4)
+        .redirects(8)
         .build();
     let response = agent
         .get(url)
-        .set("User-Agent", "FreedomArchive")
+        .set(
+            "User-Agent",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+        )
+        .set(
+            "Accept",
+            "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+        )
         .call()
         .map_err(|err| match err {
             ureq::Error::Status(code, _) => format!("ссылка ответила {code}"),
-            _ => "не удалось скачать изображение".into(),
+            other => download_err(&other.to_string()),
         })?;
 
     let mut bytes = Vec::new();
@@ -837,6 +859,19 @@ pub fn fetch_cover(url: &str) -> Result<PathBuf, String> {
     let path = std::env::temp_dir().join(format!("freedom-cover-{}-{}.{ext}", std::process::id(), now_millis()));
     fs::write(&path, &bytes).map_err(|err| io("не удалось сохранить изображение", err))?;
     Ok(path)
+}
+
+fn download_err(detail: &str) -> String {
+    let lower = detail.to_ascii_lowercase();
+    if lower.contains("dns failed") || lower.contains("resolve dns") {
+        "не удалось найти сайт по ссылке".into()
+    } else if lower.contains("timed out") || lower.contains("timeout") {
+        "сайт не ответил вовремя".into()
+    } else if lower.contains("certificate") || lower.contains("ssl") || lower.contains("tls") {
+        "не удалось установить защищённое соединение".into()
+    } else {
+        "не удалось скачать изображение".into()
+    }
 }
 
 fn image_kind(bytes: &[u8]) -> Option<&'static str> {
@@ -859,18 +894,55 @@ fn image_kind(bytes: &[u8]) -> Option<&'static str> {
 }
 
 fn json_path(image: &Path) -> PathBuf {
-    let stem = image
+    let mut file_name = image
         .file_stem()
         .map(|stem| stem.to_os_string())
         .unwrap_or_default();
+    file_name.push(".json");
+    image
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(CARDS_DIR)
+        .join(file_name)
+}
+
+fn truncated_json_path(image: &Path) -> Option<PathBuf> {
+    let stem = image.file_stem()?;
+    if !stem.to_string_lossy().contains('.') {
+        return None;
+    }
     let mut path = image
         .parent()
         .map(Path::to_path_buf)
-        .unwrap_or_else(|| PathBuf::from("."));
-    path = path.join(CARDS_DIR);
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(CARDS_DIR);
     path.push(stem);
     path.set_extension("json");
-    path
+    let correct = json_path(image);
+    if path == correct { None } else { Some(path) }
+}
+
+fn sibling_owns_card(image: &Path, card: &Path) -> bool {
+    let Some(parent) = image.parent() else {
+        return false;
+    };
+    let Some(card_stem) = card.file_stem() else {
+        return false;
+    };
+    let Ok(read) = fs::read_dir(parent) else {
+        return false;
+    };
+    for item in read.flatten() {
+        let path = item.path();
+        if path == image || !is_image(&path) {
+            continue;
+        }
+        if path.file_stem() == Some(card_stem) {
+            return true;
+        }
+    }
+    false
 }
 
 fn find_card(image: &Path) -> PathBuf {
@@ -881,6 +953,17 @@ fn find_card(image: &Path) -> PathBuf {
     let legacy = image.with_extension("json");
     if legacy.is_file() {
         return legacy;
+    }
+    if let Some(truncated) = truncated_json_path(image) {
+        if truncated.is_file() && !sibling_owns_card(image, &truncated) {
+            if let Some(parent) = nested.parent() {
+                let _ = fs::create_dir_all(parent);
+            }
+            if fs::rename(&truncated, &nested).is_ok() {
+                return nested;
+            }
+            return truncated;
+        }
     }
     nested
 }
@@ -1102,6 +1185,46 @@ mod tests {
     }
 
     #[test]
+    fn dotted_titles_keep_separate_cards() {
+        let archive = temp_archive();
+        archive.ensure_tree().unwrap();
+        let source_dir = archive.root().with_extension("src");
+        let source = write_source(&source_dir, "cover.png");
+        let first = archive
+            .add(&source, "аниме", Some("фильмы"), 5, "Атака титанов 3")
+            .unwrap();
+        let second = archive
+            .add(&source, "аниме", Some("фильмы"), 5, "Атака титанов 3. Часть 2")
+            .unwrap();
+        let mut first_fields = BTreeMap::new();
+        first_fields.insert("studio".into(), "WIT".into());
+        let mut second_fields = BTreeMap::new();
+        second_fields.insert("studio".into(), "MAPPA".into());
+        archive.update_card(&first.relative_path, first_fields).unwrap();
+        archive.update_card(&second.relative_path, second_fields).unwrap();
+
+        let listed = archive.list().unwrap();
+        let first = listed.iter().find(|entry| entry.title == "Атака титанов 3").unwrap();
+        let second = listed
+            .iter()
+            .find(|entry| entry.title == "Атака титанов 3. Часть 2")
+            .unwrap();
+        assert_eq!(first.fields.get("studio").map(String::as_str), Some("WIT"));
+        assert_eq!(second.fields.get("studio").map(String::as_str), Some("MAPPA"));
+        assert!(archive
+            .root()
+            .join("аниме/фильмы/5/карточки/Атака титанов 3.json")
+            .is_file());
+        assert!(archive
+            .root()
+            .join("аниме/фильмы/5/карточки/Атака титанов 3. Часть 2.json")
+            .is_file());
+
+        let _ = fs::remove_dir_all(archive.root());
+        let _ = fs::remove_dir_all(source_dir);
+    }
+
+    #[test]
     fn sanitize_removes_forbidden_characters() {
         assert_eq!(sanitize_title("Повелитель").unwrap(), "Повелитель");
         assert_eq!(sanitize_title("a/b:c*?").unwrap(), "a b c");
@@ -1114,6 +1237,17 @@ mod tests {
         assert!(fetch_cover("file:///C:/Windows/win.ini").is_err());
         assert!(fetch_cover("not a url").is_err());
         assert!(fetch_cover("").is_err());
+    }
+
+    #[test]
+    fn fetch_cover_downloads_https_png() {
+        let path = fetch_cover(
+            "https://upload.wikimedia.org/wikipedia/commons/thumb/4/47/PNG_transparency_demonstration_1.png/120px-PNG_transparency_demonstration_1.png",
+        )
+        .expect("https download should work with native-tls connector");
+        let bytes = fs::read(&path).unwrap();
+        let _ = fs::remove_file(&path);
+        assert!(image_kind(&bytes).is_some());
     }
 
     #[test]
@@ -1275,6 +1409,20 @@ mod tests {
         );
         assert!(outside.is_err());
         assert!(archive.move_entry(&moved.relative_path, "фильмы", Some("лишняя"), 1, "x").is_err());
+
+        let rival = archive
+            .add(&source, "аниме", Some("сериалы"), 4, "Сосед")
+            .unwrap();
+        let mut rival_fields = BTreeMap::new();
+        rival_fields.insert("studio".into(), "OLD".into());
+        archive.update_card(&rival.relative_path, rival_fields).unwrap();
+        let replaced = archive
+            .move_entry(&moved.relative_path, "аниме", Some("сериалы"), 4, "Сосед")
+            .unwrap();
+        assert_eq!(replaced.relative_path, "аниме/сериалы/4/Сосед.png");
+        assert_eq!(replaced.fields.get("year").map(String::as_str), Some("2015"));
+        assert!(!archive.root().join("аниме/сериалы/4/Повелитель 2.png").exists());
+        assert_eq!(archive.list().unwrap().len(), 1);
 
         let _ = fs::remove_dir_all(archive.root());
         let _ = fs::remove_dir_all(source_dir);

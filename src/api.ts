@@ -37,6 +37,13 @@ export function moveEntry(args: {
   return invoke<Entry>("move_entry", args);
 }
 
+export function lookupMeta(
+  category: string,
+  title: string,
+): Promise<Record<string, string>> {
+  return invoke<Record<string, string>>("lookup_meta", { category, title });
+}
+
 export function errorText(error: unknown): string {
   if (typeof error === "string") return error;
   if (error instanceof Error) return error.message;

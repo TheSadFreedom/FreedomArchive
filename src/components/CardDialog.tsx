@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type Dispatch, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type SetStateAction } from "react";
-import { deleteEntry, errorText, moveEntry, updateCard } from "../api";
+import { deleteEntry, errorText, lookupMeta, moveEntry, updateCard } from "../api";
 import { Cover } from "./Cover";
 import { Stars } from "./Stars";
 import {
@@ -27,7 +27,7 @@ const hints: Record<string, string> = {
 };
 
 const plainFields = new Set(["genre", "themes", "theme", "summary"]);
-const animeListKeys = new Set(["director", "author", "franchise", "studio", "country"]);
+const animeListKeys = new Set(["director", "franchise", "studio", "country"]);
 
 type ListMode = "single" | "comma" | "lines";
 
@@ -123,6 +123,7 @@ function FieldControl({
 }) {
   const hint = hints[field.key] ?? (list === "comma" ? "через запятую" : undefined);
   const listField = list !== "single";
+  const roomy = field.key === "genre" || field.key === "themes" || field.key === "theme";
   const anchor = useRef<HTMLDivElement>(null);
   const [open, setOpen] = useState(false);
   const [above, setAbove] = useState(false);
@@ -172,7 +173,7 @@ function FieldControl({
     }
   }
 
-  const control = field.kind === "textarea" ? (
+  const control = field.kind === "textarea" || roomy ? (
     <textarea
       rows={field.key === "summary" ? 7 : 4}
       value={value}
@@ -201,7 +202,7 @@ function FieldControl({
   );
 
   return (
-    <div className={field.kind === "textarea" ? "editor-field wide" : "editor-field"}>
+    <div className={["editor-field", field.kind === "textarea" || roomy ? "wide" : "", roomy ? "roomy" : ""].filter(Boolean).join(" ")}>
       <span className="editor-label">
         {field.label}
         {hint && <span className="field-hint">{hint}</span>}
@@ -254,6 +255,7 @@ export function CardDialog({ entry, entries, onClose, onSaved, onDeleted }: Card
   const [fields, setFields] = useState<Record<string, string>>(entry.fields);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const [looking, setLooking] = useState(false);
   const [confirming, setConfirming] = useState(false);
   const formRef = useRef<HTMLFormElement>(null);
 
@@ -264,6 +266,7 @@ export function CardDialog({ entry, entries, onClose, onSaved, onDeleted }: Card
     setRating(entry.rating);
     setFields(entry.fields);
     setError("");
+    setLooking(false);
     setConfirming(false);
   }, [entry]);
 
@@ -309,12 +312,13 @@ export function CardDialog({ entry, entries, onClose, onSaved, onDeleted }: Card
     setError("");
     setBusy(true);
     try {
+      const nextTitle = title.trim();
       const nextSub = subs.length && subcategory ? subcategory : null;
       const nextRating = rated ? rating : 0;
       const placementChanged =
-        title !== entry.title ||
+        nextTitle !== entry.title.trim() ||
         category !== entry.category ||
-        nextSub !== entry.subcategory ||
+        nextSub !== (entry.subcategory ?? null) ||
         nextRating !== entry.rating;
       let relativePath = entry.relativePath;
       if (placementChanged) {
@@ -323,7 +327,7 @@ export function CardDialog({ entry, entries, onClose, onSaved, onDeleted }: Card
           category,
           subcategory: nextSub,
           rating: nextRating,
-          title,
+          title: nextTitle,
         });
         relativePath = moved.relativePath;
       }
@@ -352,6 +356,32 @@ export function CardDialog({ entry, entries, onClose, onSaved, onDeleted }: Card
     }
   }
 
+  async function autoLookup() {
+    const query = title.trim();
+    if (!query) {
+      setError("сначала укажите название");
+      return;
+    }
+    setError("");
+    setLooking(true);
+    try {
+      const found = await lookupMeta(category, query);
+      const allowed = new Set(fieldDefs.map((field) => field.key));
+      setFields((current) => {
+        const next = { ...current };
+        for (const [key, value] of Object.entries(found)) {
+          if (!allowed.has(key) || !value.trim()) continue;
+          next[key] = value;
+        }
+        return next;
+      });
+    } catch (caught) {
+      setError(errorText(caught));
+    } finally {
+      setLooking(false);
+    }
+  }
+
   const summary = fieldDefs.find((field) => field.key === "summary");
   const actors = fieldDefs.find((field) => field.key === "actors");
   const themes = fieldDefs.find((field) => field.key === "themes" || field.key === "theme");
@@ -374,8 +404,16 @@ export function CardDialog({ entry, entries, onClose, onSaved, onDeleted }: Card
     category === "игры" ||
     category === "манга" ||
     category === "мульт";
+  const canLookup =
+    category === "аниме" ||
+    category === "манга" ||
+    category === "кино" ||
+    category === "мульт" ||
+    category === "игры" ||
+    category === "книги";
   const subTitle = subs.find((item) => item.id === subcategory)?.title;
   const place = [current?.title, subTitle].filter(Boolean).join(" · ");
+  const locked = busy || looking || confirming;
 
   return (
     <form
@@ -408,11 +446,32 @@ export function CardDialog({ entry, entries, onClose, onSaved, onDeleted }: Card
               </button>
             </>
           ) : (
-            <button type="button" className="ghost danger-quiet" disabled={busy} onClick={() => setConfirming(true)}>
-              Удалить
-            </button>
+            <>
+              {canLookup && (
+                <button
+                  type="button"
+                  className="ghost lookup"
+                  disabled={locked || !title.trim()}
+                  onClick={autoLookup}
+                  title={
+                    category === "аниме" || category === "манга"
+                      ? "Найти на Shikimori"
+                      : category === "кино" || category === "мульт"
+                        ? "Найти на Кинопоиске"
+                        : category === "игры"
+                          ? "Найти в Steam"
+                          : "Найти на LitRes"
+                  }
+                >
+                  {looking ? "Ищу…" : "Авто-поиск"}
+                </button>
+              )}
+              <button type="button" className="ghost danger-quiet" disabled={locked} onClick={() => setConfirming(true)}>
+                Удалить
+              </button>
+            </>
           )}
-          <button type="submit" className="primary" disabled={busy || confirming || !title.trim()}>
+          <button type="submit" className="primary" disabled={locked || !title.trim()}>
             {busy && !confirming ? "Сохраняю…" : "Сохранить"}
           </button>
         </div>
@@ -433,21 +492,26 @@ export function CardDialog({ entry, entries, onClose, onSaved, onDeleted }: Card
 
         <div className="card-page-main">
           <div className="card-names">
-            <input
+            <textarea
               id="card-title"
               className="card-name"
+              rows={2}
               value={title}
-              onChange={(event) => setTitle(event.target.value)}
+              onChange={(event) => setTitle(event.target.value.replace(/\s*\n\s*/g, " "))}
               required
               aria-label="Название"
               placeholder="Название"
             />
             {altTitle && (
-              <input
+              <textarea
                 className="card-alt"
+                rows={2}
                 value={fields.altTitle ?? ""}
                 onChange={(event) =>
-                  setFields((currentFields) => ({ ...currentFields, altTitle: event.target.value }))
+                  setFields((currentFields) => ({
+                    ...currentFields,
+                    altTitle: event.target.value.replace(/\s*\n\s*/g, " "),
+                  }))
                 }
                 aria-label="Альтернативное название"
                 placeholder="Альтернативное название"

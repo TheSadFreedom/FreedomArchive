@@ -1,4 +1,6 @@
 mod archive;
+mod lookup;
+mod net;
 
 use std::collections::BTreeMap;
 
@@ -94,6 +96,11 @@ fn move_entry(
     )
 }
 
+#[tauri::command]
+fn lookup_meta(category: String, title: String) -> Result<BTreeMap<String, String>, String> {
+    lookup::lookup(&category, &title)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -111,7 +118,8 @@ pub fn run() {
             add_entry,
             update_card,
             move_entry,
-            delete_entry
+            delete_entry,
+            lookup_meta
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

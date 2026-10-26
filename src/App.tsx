@@ -14,7 +14,7 @@ import {
   ratingLabel,
   usesRating,
 } from "./schema/categories";
-import { collectFacets, matchesFacets, tagKey } from "./schema/tags";
+import { collectFacets, fieldValues, matchesFacets, tagKey } from "./schema/tags";
 import { compareEntries, defaultSortDir, type SortDir, type SortKey } from "./schema/sort";
 import type { Entry } from "./types";
 import { displayTitle } from "./title";
@@ -115,6 +115,40 @@ export default function App() {
     [pageEntries, activeSub],
   );
 
+  const facetCounts = useMemo(() => {
+    const maps = new Map<string, Map<string, number>>();
+    for (const entry of shelfEntries) {
+      for (const [key, raw] of Object.entries(entry.fields)) {
+        const values = fieldValues(key, raw);
+        if (values.length === 0) continue;
+        let bucket = maps.get(key);
+        if (!bucket) {
+          bucket = new Map();
+          maps.set(key, bucket);
+        }
+        for (const value of values) {
+          const id = tagKey(value);
+          bucket.set(id, (bucket.get(id) ?? 0) + 1);
+        }
+      }
+    }
+    return maps;
+  }, [shelfEntries]);
+  const subCounts = useMemo(() => {
+    const map = new Map<string, number>();
+    for (const entry of pageEntries) {
+      const id = entry.subcategory ?? "";
+      map.set(id, (map.get(id) ?? 0) + 1);
+    }
+    return map;
+  }, [pageEntries]);
+  const ratingCounts = useMemo(() => {
+    const map = new Map<number, number>();
+    for (const entry of shelfEntries) {
+      map.set(entry.rating, (map.get(entry.rating) ?? 0) + 1);
+    }
+    return map;
+  }, [shelfEntries]);
   const facets = useMemo(
     () => collectFacets(fieldsFor(current?.id, activeSub), shelfEntries),
     [current, activeSub, shelfEntries],
@@ -157,12 +191,31 @@ export default function App() {
   const shownSorts = query
     ? sortOptions.filter((item) => item.label.toLocaleLowerCase("ru").includes(query))
     : sortOptions;
-  const shownSubs = query
+  const shownSubs = [...(query
     ? subs.filter((item) => item.title.toLocaleLowerCase("ru").includes(query))
-    : subs;
+    : subs)].sort(
+    (left, right) =>
+      (subCounts.get(right.id) ?? 0) - (subCounts.get(left.id) ?? 0) ||
+      left.title.localeCompare(right.title, "ru"),
+  );
   const shownFacets = useMemo(() => {
-    if (!query) return facets;
-    return facets
+    const ranked = facets.map((facet) => {
+      return {
+        ...facet,
+        values: [...facet.values].sort((left, right) => {
+          if (facet.key === "released" || facet.key === "year") {
+            return Number(right) - Number(left) || left.localeCompare(right, "ru");
+          }
+          const counts = facetCounts.get(facet.key);
+          return (
+            (counts?.get(tagKey(right)) ?? 0) - (counts?.get(tagKey(left)) ?? 0) ||
+            left.localeCompare(right, "ru")
+          );
+        }),
+      };
+    });
+    if (!query) return ranked;
+    return ranked
       .map((facet) => {
         const labelHit = facet.label.toLocaleLowerCase("ru").includes(query);
         return {
@@ -173,7 +226,7 @@ export default function App() {
         };
       })
       .filter((facet) => facet.values.length > 0);
-  }, [facets, query]);
+  }, [facets, facetCounts, query]);
   const filtersOn = (showRating && rating !== "") || Object.keys(selectedFacets).length > 0;
   const activeTokens = facets.flatMap((facet) =>
     (selectedFacets[facet.key] ?? []).map((key) => ({
@@ -502,76 +555,95 @@ export default function App() {
             </div>
           )}
 
-          <input
-            className="filter-search"
-            value={filterQuery}
-            onChange={(event) => setFilterQuery(event.target.value)}
-            placeholder="Найти"
-            aria-label="Найти фильтр"
-          />
+          <label className="filter-search">
+            <input
+              value={filterQuery}
+              onChange={(event) => setFilterQuery(event.target.value)}
+              placeholder="Найти"
+              aria-label="Найти фильтр"
+            />
+            <svg className="filter-loupe" viewBox="0 0 24 24" aria-hidden="true">
+              <circle cx="10.2" cy="10.2" r="5.7" fill="none" stroke="currentColor" strokeWidth="1.8" />
+              <path d="M14.5 14.5 19.2 19.2" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+            </svg>
+          </label>
 
           {shownSorts.length > 0 && (
             <div className="filter-block">
               <p className="filter-label">Сортировка</p>
-              <div className="filter-options" role="group" aria-label="Сортировка">
+              <ul className="filter-list">
                 {shownSorts.map((item) => {
                   const on = sortKey === item.key;
                   const dirLabel = sortDir === "asc" ? "по возрастанию" : "по убыванию";
                   return (
-                    <button
-                      key={item.key}
-                      type="button"
-                      className={on ? "filter-option on" : "filter-option"}
-                      aria-pressed={on}
-                      aria-label={on ? `${item.label}, ${dirLabel}` : item.label}
-                      onClick={() => chooseSort(item.key)}
-                    >
-                      {item.label}
-                      {on && <span className="filter-dir">{sortDir === "asc" ? "↑" : "↓"}</span>}
-                    </button>
+                    <li key={item.key}>
+                      <label className="filter-check">
+                        <input
+                          type="checkbox"
+                          checked={on}
+                          aria-label={on ? `${item.label}, ${dirLabel}` : item.label}
+                          onChange={() => chooseSort(item.key)}
+                        />
+                        <span className="filter-tick" aria-hidden="true" />
+                        <span>
+                          {item.label}
+                          {on && <span className="filter-dir">{sortDir === "asc" ? "↑" : "↓"}</span>}
+                        </span>
+                      </label>
+                    </li>
                   );
                 })}
-              </div>
+              </ul>
             </div>
           )}
 
           {shownSubs.length > 0 && (
             <div className="filter-block">
               <p className="filter-label">Подкатегория</p>
-              <div className="filter-options" role="group" aria-label="Подкатегория">
+              <ul className="filter-list">
                 {shownSubs.map((item) => (
-                  <button
-                    key={item.id}
-                    type="button"
-                    className={activeSub === item.id ? "filter-option on" : "filter-option"}
-                    onClick={() => setSubcategory(item.id)}
-                  >
-                    {item.title}
-                  </button>
+                  <li key={item.id}>
+                    <label className="filter-check">
+                      <input
+                        type="checkbox"
+                        checked={activeSub === item.id}
+                        onChange={() => setSubcategory(item.id)}
+                      />
+                      <span className="filter-tick" aria-hidden="true" />
+                      <span className="filter-name">{item.title}</span>
+                      <span className="filter-qty">{subCounts.get(item.id) ?? 0}</span>
+                    </label>
+                  </li>
                 ))}
-              </div>
+              </ul>
             </div>
           )}
 
           {showRating && (
           <div className="filter-block">
             <p className="filter-label">Оценка</p>
-            <div className="filter-options" role="group" aria-label="Оценка">
-              <button
-                type="button"
-                className={rating === "" ? "filter-option on" : "filter-option"}
-                onClick={() => setRating("")}
-              >
-                Все
-              </button>
-              <button
-                type="button"
-                className={rating === "0" ? "filter-option on" : "filter-option"}
-                onClick={() => setRating(rating === "0" ? "" : "0")}
-              >
-                Без оценки
-              </button>
-            </div>
+            <ul className="filter-list">
+              <li>
+                <label className="filter-check">
+                  <input type="checkbox" checked={rating === ""} onChange={() => setRating("")} />
+                  <span className="filter-tick" aria-hidden="true" />
+                  <span className="filter-name">Все</span>
+                  <span className="filter-qty">{shelfEntries.length}</span>
+                </label>
+              </li>
+              <li>
+                <label className="filter-check">
+                  <input
+                    type="checkbox"
+                    checked={rating === "0"}
+                    onChange={() => setRating(rating === "0" ? "" : "0")}
+                  />
+                  <span className="filter-tick" aria-hidden="true" />
+                  <span className="filter-name">Без оценки</span>
+                  <span className="filter-qty">{ratingCounts.get(0) ?? 0}</span>
+                </label>
+              </li>
+            </ul>
             <div className="filter-stars" role="group" aria-label="Оценка звёздами">
               {[1, 2, 3, 4, 5].map((value) => (
                 <button
@@ -579,7 +651,7 @@ export default function App() {
                   type="button"
                   className={rating !== "" && rating !== "0" && Number(rating) >= value ? "star on" : "star"}
                   aria-pressed={rating === String(value)}
-                  aria-label={ratingLabel(value)}
+                  aria-label={`${ratingLabel(value)}, ${ratingCounts.get(value) ?? 0}`}
                   onClick={() => setRating(rating === String(value) ? "" : String(value))}
                 >
                   <svg viewBox="0 0 16 16" aria-hidden="true">
@@ -588,6 +660,7 @@ export default function App() {
                       d="M8 1.2 9.85 5.55l4.7.4-3.58 3.1 1.1 4.6L8 11.25 3.93 13.65l1.1-4.6L1.45 5.95l4.7-.4L8 1.2Z"
                     />
                   </svg>
+                  <span className="filter-qty">{ratingCounts.get(value) ?? 0}</span>
                 </button>
               ))}
             </div>
@@ -617,23 +690,26 @@ export default function App() {
                 </button>
                 {open && (
                   <div className="filter-values">
-                    <div className="filter-options" role="group" aria-label={facet.label}>
+                    <ul className="filter-list">
                       {facet.values.map((value) => {
                         const key = tagKey(value);
                         const on = picked.includes(key);
                         return (
-                          <button
-                            key={key}
-                            type="button"
-                            className={on ? "filter-option on" : "filter-option"}
-                            aria-pressed={on}
-                            onClick={() => toggleFacetValue(facet.key, key)}
-                          >
-                            {value}
-                          </button>
+                          <li key={key}>
+                            <label className="filter-check">
+                              <input
+                                type="checkbox"
+                                checked={on}
+                                onChange={() => toggleFacetValue(facet.key, key)}
+                              />
+                              <span className="filter-tick" aria-hidden="true" />
+                              <span className="filter-name">{value}</span>
+                              <span className="filter-qty">{facetCounts.get(facet.key)?.get(key) ?? 0}</span>
+                            </label>
+                          </li>
                         );
                       })}
-                    </div>
+                    </ul>
                     {picked.length > 0 && (
                       <button type="button" className="filter-clear" onClick={() => clearFacet(facet.key)}>
                         Сбросить

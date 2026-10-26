@@ -137,7 +137,13 @@ export function collectFacets(
   entries: { fields: Record<string, string> }[],
 ): Facet[] {
   return fields
-    .filter((field) => field.key !== "summary" && field.key !== "altTitle")
+    .filter(
+      (field) =>
+        field.key !== "summary" &&
+        field.key !== "altTitle" &&
+        field.key !== "episodes" &&
+        field.key !== "duration",
+    )
     .map((field) => ({
       key: field.key,
       label: field.key === "released" ? "Год выхода" : field.label,
