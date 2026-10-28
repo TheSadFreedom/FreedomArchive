@@ -64,6 +64,31 @@ pub fn browser_agent_get(agent: &ureq::Agent, url: &str) -> Result<String, Strin
     )
 }
 
+pub fn agent_post_json(
+    agent: &ureq::Agent,
+    url: &str,
+    user_agent: &str,
+    body: &str,
+) -> Result<String, String> {
+    let response = agent
+        .post(url)
+        .set("User-Agent", user_agent)
+        .set("Accept", "application/json")
+        .set("Content-Type", "application/json; charset=utf-8")
+        .send_string(body)
+        .map_err(map_ureq)?;
+    let mut bytes = Vec::new();
+    response
+        .into_reader()
+        .take(8 * 1024 * 1024 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|err| format!("не удалось прочитать ответ ({err})"))?;
+    if bytes.len() > 8 * 1024 * 1024 {
+        return Err("ответ слишком большой".into());
+    }
+    String::from_utf8(bytes).map_err(|_| "ответ не в UTF-8".into())
+}
+
 pub fn get_json(url: &str, user_agent: &str) -> Result<serde_json::Value, String> {
     let text = get_text(url, user_agent, "application/json")?;
     serde_json::from_str(&text).map_err(|_| "сайт вернул не JSON".into())

@@ -58,6 +58,35 @@ const SHELVES: &[Shelf] = &[
         ],
         rated: false,
     },
+    Shelf {
+        id: "планы",
+        subs: QUEUE_SUBS,
+        rated: false,
+    },
+    Shelf {
+        id: "ожидание",
+        subs: QUEUE_SUBS,
+        rated: false,
+    },
+    Shelf {
+        id: "пересмотр",
+        subs: QUEUE_SUBS,
+        rated: false,
+    },
+    Shelf {
+        id: "брошено",
+        subs: QUEUE_SUBS,
+        rated: false,
+    },
+];
+
+const QUEUE_SUBS: &[&str] = &[
+    "аниме",
+    "фильмы",
+    "сериалы",
+    "мультфильмы",
+    "мультсериалы",
+    "книги",
 ];
 
 const GAME_SHELF_MOVES: &[(&str, &str)] = &[
@@ -162,18 +191,24 @@ impl Archive {
         subcategory: Option<&str>,
         rating: u8,
         title: &str,
+        year: u16,
     ) -> Result<Entry, String> {
-        let title = sanitize_title(title)?;
+        let display = display_title(title)?;
+        let stem = build_file_stem(&display, year)?;
         let ext = image_extension(source)?;
         if !source.is_file() {
             return Err("исходный файл не найден".into());
         }
-        let (image, meta) = self.destination(category, subcategory, rating, &title, &ext)?;
+        let (image, meta) = self.destination(category, subcategory, rating, &stem, &ext)?;
         if image.exists() || meta.exists() {
             return Err("такая запись уже есть".into());
         }
         fs::copy(source, &image).map_err(|err| io("не удалось скопировать обложку", err))?;
-        self.read_entry(&image, category, subcategory, rating, &title)
+        let mut fields = BTreeMap::new();
+        fields.insert("title".into(), display);
+        fields.insert("released".into(), year.to_string());
+        store_card(&image, &fields)?;
+        self.read_entry(&image, category, subcategory, rating, &stem)
     }
 
     pub fn update_card(
@@ -194,15 +229,20 @@ impl Archive {
         subcategory: Option<&str>,
         rating: u8,
         title: &str,
+        year: u16,
     ) -> Result<Entry, String> {
         let source_image = self.image_from_relative(relative_path)?;
-        let title = sanitize_title(title)?;
+        let display = display_title(title)?;
+        let stem = build_file_stem(&display, year)?;
         let ext = image_extension(&source_image)?;
         let (dest_image, dest_meta) =
-            self.destination(category, subcategory, rating, &title, &ext)?;
+            self.destination(category, subcategory, rating, &stem, &ext)?;
         let source_meta = find_card(&source_image);
 
         if paths_equal(&source_image, &dest_image) {
+            let mut fields = read_card(&find_card(&source_image));
+            fields.insert("title".into(), display);
+            store_card(&source_image, &fields)?;
             return self.entry_at(&source_image);
         }
         for path in [
@@ -229,7 +269,10 @@ impl Archive {
             }
         }
 
-        self.read_entry(&dest_image, category, subcategory, rating, &title)
+        let mut fields = read_card(&find_card(&dest_image));
+        fields.insert("title".into(), display);
+        store_card(&dest_image, &fields)?;
+        self.read_entry(&dest_image, category, subcategory, rating, &stem)
     }
 
     pub fn delete_entry(&self, relative_path: &str) -> Result<(), String> {
@@ -287,12 +330,19 @@ impl Archive {
         let dir = self.leaf(category, subcategory, rating)?;
         fs::create_dir_all(&dir).map_err(|err| io("не удалось создать папку", err))?;
         self.ensure_inside(&dir)?;
-        let image = dir.join(format!("{title}.{ext}"));
-        check_len(&image)?;
-        self.ensure_inside(&image)?;
-        let meta = json_path(&image);
-        self.ensure_inside(&meta)?;
-        Ok((image, meta))
+        let mut stem = title.to_string();
+        loop {
+            let image = dir.join(format!("{stem}.{ext}"));
+            let meta = json_path(&image);
+            if path_byte_len(&image) <= PATH_MAX_BYTES && path_byte_len(&meta) <= PATH_MAX_BYTES {
+                self.ensure_inside(&image)?;
+                self.ensure_inside(&meta)?;
+                return Ok((image, meta));
+            }
+            if !shorten_file_stem(&mut stem) {
+                return Err("слишком длинный путь".into());
+            }
+        }
     }
 
     fn leaf(&self, category: &str, subcategory: Option<&str>, rating: u8) -> Result<PathBuf, String> {
@@ -587,9 +637,16 @@ impl Archive {
         let image_path = path_to_string(image)?;
         let fields = read_card(&find_card(image));
         let rating = if shelf_rated(category) { rating } else { 0 };
+        let display = fields
+            .get("title")
+            .map(String::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or(title)
+            .to_string();
         Ok(Entry {
             relative_path: relative,
-            title: title.to_string(),
+            title: display,
             category: category.to_string(),
             subcategory: subcategory.map(str::to_string),
             rating,
@@ -756,7 +813,21 @@ fn check_placement(category: &str, subcategory: Option<&str>, rating: u8) -> Res
     }
 }
 
-pub fn sanitize_title(raw: &str) -> Result<String, String> {
+const FILE_STEM_MAX: usize = 72;
+const PATH_MAX_BYTES: usize = 240;
+
+fn display_title(raw: &str) -> Result<String, String> {
+    let title = raw.trim();
+    if title.is_empty() {
+        return Err("пустое название".into());
+    }
+    if title.chars().count() > 8000 {
+        return Err("слишком длинное название".into());
+    }
+    Ok(title.to_string())
+}
+
+fn sanitize_file_part(raw: &str) -> String {
     let mut cleaned = String::new();
     for ch in raw.chars() {
         if matches!(ch, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*') || ch.is_control() {
@@ -765,20 +836,45 @@ pub fn sanitize_title(raw: &str) -> Result<String, String> {
             cleaned.push(ch);
         }
     }
-    let collapsed = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
-    let title = collapsed
+    cleaned
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
         .trim_matches(|ch: char| ch == '.' || ch.is_whitespace())
-        .to_string();
-    if title.is_empty() {
+        .to_string()
+}
+
+pub fn build_file_stem(display_title: &str, year: u16) -> Result<String, String> {
+    if !(1800..=2099).contains(&year) {
+        return Err("нужен год выхода".into());
+    }
+    let suffix = format!(" ({year})");
+    let budget = FILE_STEM_MAX.saturating_sub(suffix.chars().count());
+    let safe = sanitize_file_part(display_title);
+    if safe.is_empty() {
         return Err("пустое название".into());
     }
-    if title.chars().count() > 200 {
-        return Err("слишком длинное название".into());
-    }
-    if is_reserved(&title) {
+    let name = if safe.chars().count() <= budget {
+        safe
+    } else {
+        let take = budget.saturating_sub(3);
+        let cut = safe
+            .chars()
+            .take(take)
+            .collect::<String>()
+            .trim_end()
+            .trim_end_matches('.')
+            .to_string();
+        if cut.is_empty() {
+            return Err("слишком длинное название".into());
+        }
+        format!("{cut}...")
+    };
+    let stem = format!("{name}{suffix}");
+    if is_reserved(&stem) {
         return Err("недопустимое имя файла".into());
     }
-    Ok(title)
+    Ok(stem)
 }
 
 fn is_reserved(name: &str) -> bool {
@@ -1122,12 +1218,51 @@ fn clean_fields(fields: BTreeMap<String, String>) -> Result<BTreeMap<String, Str
     Ok(cleaned)
 }
 
+fn path_byte_len(path: &Path) -> usize {
+    path.to_string_lossy().len()
+}
+
 fn check_len(path: &Path) -> Result<(), String> {
-    if path.to_string_lossy().len() > 240 {
+    if path_byte_len(path) > PATH_MAX_BYTES {
         Err("слишком длинный путь".into())
     } else {
         Ok(())
     }
+}
+
+/// Shorten `Name (Year)` / `Name... (Year)` by a few characters, keeping the year suffix.
+fn shorten_file_stem(stem: &mut String) -> bool {
+    let year = stem
+        .rsplit_once(" (")
+        .and_then(|(name, rest)| {
+            let year = rest.strip_suffix(')')?;
+            if year.len() == 4 && year.chars().all(|ch| ch.is_ascii_digit()) {
+                Some((name, year))
+            } else {
+                None
+            }
+        });
+    let (name, suffix) = match year {
+        Some((name, year)) => (name.to_string(), format!(" ({year})")),
+        None => (stem.clone(), String::new()),
+    };
+    let name = name
+        .trim_end_matches('.')
+        .trim_end()
+        .trim_end_matches("...")
+        .trim_end();
+    let chars: Vec<char> = name.chars().collect();
+    if chars.len() <= 8 {
+        return false;
+    }
+    let cut = chars.len().saturating_sub(4).max(4);
+    let mut next: String = chars.into_iter().take(cut).collect();
+    next = next.trim_end().trim_end_matches('.').to_string();
+    if next.is_empty() {
+        return false;
+    }
+    *stem = format!("{next}...{suffix}");
+    true
 }
 
 fn path_to_string(path: &Path) -> Result<String, String> {
@@ -1191,14 +1326,16 @@ mod tests {
         let source_dir = archive.root().with_extension("src");
         let source = write_source(&source_dir, "cover.png");
         let first = archive
-            .add(&source, "аниме", Some("фильмы"), 5, "Атака титанов 3")
+            .add(&source, "аниме", Some("фильмы"), 5, "Атака титанов 3", 2015)
             .unwrap();
         let second = archive
-            .add(&source, "аниме", Some("фильмы"), 5, "Атака титанов 3. Часть 2")
+            .add(&source, "аниме", Some("фильмы"), 5, "Атака титанов 3. Часть 2", 2015)
             .unwrap();
         let mut first_fields = BTreeMap::new();
+        first_fields.insert("title".into(), "Атака титанов 3".into());
         first_fields.insert("studio".into(), "WIT".into());
         let mut second_fields = BTreeMap::new();
+        second_fields.insert("title".into(), "Атака титанов 3. Часть 2".into());
         second_fields.insert("studio".into(), "MAPPA".into());
         archive.update_card(&first.relative_path, first_fields).unwrap();
         archive.update_card(&second.relative_path, second_fields).unwrap();
@@ -1213,11 +1350,11 @@ mod tests {
         assert_eq!(second.fields.get("studio").map(String::as_str), Some("MAPPA"));
         assert!(archive
             .root()
-            .join("аниме/фильмы/5/карточки/Атака титанов 3.json")
+            .join("аниме/фильмы/5/карточки/Атака титанов 3 (2015).json")
             .is_file());
         assert!(archive
             .root()
-            .join("аниме/фильмы/5/карточки/Атака титанов 3. Часть 2.json")
+            .join("аниме/фильмы/5/карточки/Атака титанов 3. Часть 2 (2015).json")
             .is_file());
 
         let _ = fs::remove_dir_all(archive.root());
@@ -1225,11 +1362,15 @@ mod tests {
     }
 
     #[test]
-    fn sanitize_removes_forbidden_characters() {
-        assert_eq!(sanitize_title("Повелитель").unwrap(), "Повелитель");
-        assert_eq!(sanitize_title("a/b:c*?").unwrap(), "a b c");
-        assert!(sanitize_title("...").is_err());
-        assert!(sanitize_title("CON").is_err());
+    fn file_stem_keeps_year_and_truncates() {
+        assert_eq!(build_file_stem("Повелитель", 2015).unwrap(), "Повелитель (2015)");
+        assert_eq!(build_file_stem("a/b:c*?", 2020).unwrap(), "a b c (2020)");
+        assert!(build_file_stem("...", 2020).is_err());
+        let long = "я".repeat(200);
+        let stem = build_file_stem(&long, 1999).unwrap();
+        assert!(stem.ends_with(" (1999)"));
+        assert!(stem.contains("..."));
+        assert!(stem.chars().count() <= 72);
     }
 
     #[test]
@@ -1263,16 +1404,28 @@ mod tests {
         assert!(archive.root().join("манга/хентай/4").is_dir());
         let source_dir = archive.root().with_extension("src");
         let source = write_source(&source_dir, "cover.png");
-        let plain = archive.add(&source, "манга", Some("манга"), 2, "Том").unwrap();
-        assert_eq!(plain.relative_path, "манга/манга/2/Том.png");
+        let plain = archive.add(&source, "манга", Some("манга"), 2, "Том", 2015).unwrap();
+        assert_eq!(plain.relative_path, "манга/манга/2/Том (2015).png");
         let adult = archive
-            .add(&source, "манга", Some("хентай"), 3, "Том х")
+            .add(&source, "манга", Some("хентай"), 3, "Том х", 2015)
             .unwrap();
-        assert_eq!(adult.relative_path, "манга/хентай/3/Том х.png");
+        assert_eq!(adult.relative_path, "манга/хентай/3/Том х (2015).png");
         let anime_adult = archive
-            .add(&source, "аниме", Some("хентай"), 1, "Серия")
+            .add(&source, "аниме", Some("хентай"), 1, "Серия", 2015)
             .unwrap();
-        assert_eq!(anime_adult.relative_path, "аниме/хентай/1/Серия.png");
+        assert_eq!(anime_adult.relative_path, "аниме/хентай/1/Серия (2015).png");
+        let planned = archive
+            .add(&source, "планы", Some("фильмы"), 4, "Потом", 2015)
+            .unwrap();
+        assert_eq!(planned.relative_path, "планы/фильмы/Потом (2015).png");
+        let rewatch = archive
+            .add(&source, "пересмотр", Some("аниме"), 4, "Снова", 2015)
+            .unwrap();
+        assert_eq!(rewatch.relative_path, "пересмотр/аниме/Снова (2015).png");
+        let dropped = archive
+            .add(&source, "брошено", Some("книги"), 2, "Не дочитал", 2015)
+            .unwrap();
+        assert_eq!(dropped.relative_path, "брошено/книги/Не дочитал (2015).png");
         let _ = fs::remove_dir_all(&source_dir);
         assert!(archive.root().join("кино/фильмы/4").is_dir());
         assert!(archive.root().join("кино/сериалы/1").is_dir());
@@ -1283,6 +1436,26 @@ mod tests {
         assert!(!archive.root().join("мультфильмы").exists());
         assert!(!archive.root().join("мультсериалы").exists());
         assert!(!archive.root().join("хентай").exists());
+        assert!(archive.root().join("планы/аниме").is_dir());
+        assert!(archive.root().join("планы/фильмы").is_dir());
+        assert!(archive.root().join("планы/сериалы").is_dir());
+        assert!(archive.root().join("планы/мультфильмы").is_dir());
+        assert!(archive.root().join("планы/мультсериалы").is_dir());
+        assert!(archive.root().join("планы/книги").is_dir());
+        assert!(!archive.root().join("планы/аниме/0").exists());
+        assert!(archive.root().join("ожидание/аниме").is_dir());
+        assert!(archive.root().join("ожидание/фильмы").is_dir());
+        assert!(archive.root().join("ожидание/сериалы").is_dir());
+        assert!(archive.root().join("ожидание/мультфильмы").is_dir());
+        assert!(archive.root().join("ожидание/мультсериалы").is_dir());
+        assert!(archive.root().join("ожидание/книги").is_dir());
+        assert!(!archive.root().join("ожидание/книги/0").exists());
+        for shelf in ["пересмотр", "брошено"] {
+            for sub in ["аниме", "фильмы", "сериалы", "мультфильмы", "мультсериалы", "книги"] {
+                assert!(archive.root().join(shelf).join(sub).is_dir(), "{shelf}/{sub}");
+                assert!(!archive.root().join(shelf).join(sub).join("0").exists(), "{shelf}/{sub}/0");
+            }
+        }
         assert!(archive.root().join("игры/пройдено").is_dir());
         assert!(archive.root().join("игры/сыграно").is_dir());
         assert!(archive.root().join("игры/мобильные").is_dir());
@@ -1365,13 +1538,14 @@ mod tests {
         let source = write_source(&source_dir, "Повелитель.PNG");
 
         let added = archive
-            .add(&source, "аниме", Some("сериалы"), 0, "Повелитель:")
+            .add(&source, "аниме", Some("сериалы"), 0, "Повелитель:", 2015)
             .unwrap();
-        assert_eq!(added.relative_path, "аниме/сериалы/0/Повелитель.png");
-        assert!(added.fields.is_empty());
+        assert_eq!(added.relative_path, "аниме/сериалы/0/Повелитель (2015).png");
+        assert_eq!(added.fields.get("title").map(String::as_str), Some("Повелитель:"));
+        assert_eq!(added.fields.get("released").map(String::as_str), Some("2015"));
         assert!(source.is_file());
-        assert!(archive.root().join("аниме/сериалы/0/Повелитель.png").is_file());
-        assert!(!archive.root().join("аниме/сериалы/0/Повелитель.json").exists());
+        assert!(archive.root().join("аниме/сериалы/0/Повелитель (2015).png").is_file());
+        assert!(!archive.root().join("аниме/сериалы/0/Повелитель (2015).json").exists());
 
         let mut fields = BTreeMap::new();
         fields.insert("year".into(), "2015".into());
@@ -1386,14 +1560,14 @@ mod tests {
         assert!(!updated.fields.contains_key("blank"));
 
         let moved = archive
-            .move_entry(&added.relative_path, "аниме", Some("сериалы"), 4, "Повелитель 2")
+            .move_entry(&added.relative_path, "аниме", Some("сериалы"), 4, "Повелитель 2", 2015)
             .unwrap();
-        assert_eq!(moved.relative_path, "аниме/сериалы/4/Повелитель 2.png");
+        assert_eq!(moved.relative_path, "аниме/сериалы/4/Повелитель 2 (2015).png");
         assert_eq!(moved.fields.get("year").map(String::as_str), Some("2015"));
-        assert!(!archive.root().join("аниме/сериалы/0/Повелитель.png").exists());
-        assert!(archive.root().join("аниме/сериалы/4/карточки/Повелитель 2.json").is_file());
-        assert!(!archive.root().join("аниме/сериалы/4/Повелитель 2.json").exists());
-        let card = fs::read_to_string(archive.root().join("аниме/сериалы/4/карточки/Повелитель 2.json")).unwrap();
+        assert!(!archive.root().join("аниме/сериалы/0/Повелитель (2015).png").exists());
+        assert!(archive.root().join("аниме/сериалы/4/карточки/Повелитель 2 (2015).json").is_file());
+        assert!(!archive.root().join("аниме/сериалы/4/Повелитель 2 (2015).json").exists());
+        let card = fs::read_to_string(archive.root().join("аниме/сериалы/4/карточки/Повелитель 2 (2015).json")).unwrap();
         assert!(!card.contains("_addedAt"));
 
         let listed = archive.list().unwrap();
@@ -1406,22 +1580,23 @@ mod tests {
             None,
             1,
             "Повелитель",
+            2015,
         );
         assert!(outside.is_err());
-        assert!(archive.move_entry(&moved.relative_path, "фильмы", Some("лишняя"), 1, "x").is_err());
+        assert!(archive.move_entry(&moved.relative_path, "фильмы", Some("лишняя"), 1, "x", 2015).is_err());
 
         let rival = archive
-            .add(&source, "аниме", Some("сериалы"), 4, "Сосед")
+            .add(&source, "аниме", Some("сериалы"), 4, "Сосед", 2015)
             .unwrap();
         let mut rival_fields = BTreeMap::new();
         rival_fields.insert("studio".into(), "OLD".into());
         archive.update_card(&rival.relative_path, rival_fields).unwrap();
         let replaced = archive
-            .move_entry(&moved.relative_path, "аниме", Some("сериалы"), 4, "Сосед")
+            .move_entry(&moved.relative_path, "аниме", Some("сериалы"), 4, "Сосед", 2015)
             .unwrap();
-        assert_eq!(replaced.relative_path, "аниме/сериалы/4/Сосед.png");
+        assert_eq!(replaced.relative_path, "аниме/сериалы/4/Сосед (2015).png");
         assert_eq!(replaced.fields.get("year").map(String::as_str), Some("2015"));
-        assert!(!archive.root().join("аниме/сериалы/4/Повелитель 2.png").exists());
+        assert!(!archive.root().join("аниме/сериалы/4/Повелитель 2 (2015).png").exists());
         assert_eq!(archive.list().unwrap().len(), 1);
 
         let _ = fs::remove_dir_all(archive.root());
@@ -1436,14 +1611,14 @@ mod tests {
         let source = write_source(&source_dir, "cover.png");
 
         let removed = archive
-            .add(&source, "кино", Some("фильмы"), 2, "Удалить меня")
+            .add(&source, "кино", Some("фильмы"), 2, "Удалить меня", 2015)
             .unwrap();
-        let kept = archive.add(&source, "кино", Some("фильмы"), 2, "Оставить").unwrap();
+        let kept = archive.add(&source, "кино", Some("фильмы"), 2, "Оставить", 2015).unwrap();
         archive.delete_entry(&removed.relative_path).unwrap();
 
-        assert!(!archive.root().join("кино/фильмы/2/Удалить меня.png").exists());
-        assert!(!archive.root().join("кино/фильмы/2/карточки/Удалить меня.json").exists());
-        assert!(!archive.root().join("кино/фильмы/2/Удалить меня.json").exists());
+        assert!(!archive.root().join("кино/фильмы/2/Удалить меня (2015).png").exists());
+        assert!(!archive.root().join("кино/фильмы/2/карточки/Удалить меня (2015).json").exists());
+        assert!(!archive.root().join("кино/фильмы/2/Удалить меня (2015).json").exists());
         assert!(archive.root().join(&kept.relative_path).is_file());
         assert_eq!(archive.list().unwrap().len(), 1);
         assert!(archive.delete_entry("../Коллекции/x.png").is_err());
@@ -1459,8 +1634,8 @@ mod tests {
         archive.ensure_tree().unwrap();
         let source_dir = archive.root().with_extension("src");
         let source = write_source(&source_dir, "cover.png");
-        let added = archive.add(&source, "кино", Some("фильмы"), 1, "Без метки").unwrap();
-        assert!(!archive.root().join("кино/фильмы/1/Без метки.json").exists());
+        let added = archive.add(&source, "кино", Some("фильмы"), 1, "Без метки", 2015).unwrap();
+        assert!(!archive.root().join("кино/фильмы/1/Без метки (2015).json").exists());
 
         fs::write(
             archive.root().join("кино/фильмы/1/Старая.json"),
@@ -1479,12 +1654,12 @@ mod tests {
         let mut fields = BTreeMap::new();
         fields.insert("summary".into(), "есть".into());
         archive.update_card(&added.relative_path, fields).unwrap();
-        let saved = fs::read_to_string(archive.root().join("кино/фильмы/1/карточки/Без метки.json")).unwrap();
+        let saved = fs::read_to_string(archive.root().join("кино/фильмы/1/карточки/Без метки (2015).json")).unwrap();
         assert!(!saved.contains("_addedAt"));
         assert!(saved.contains("есть"));
-        assert!(!archive.root().join("кино/фильмы/1/Без метки.json").exists());
+        assert!(!archive.root().join("кино/фильмы/1/Без метки (2015).json").exists());
         archive.update_card(&added.relative_path, BTreeMap::new()).unwrap();
-        assert!(!archive.root().join("кино/фильмы/1/карточки/Без метки.json").exists());
+        assert!(!archive.root().join("кино/фильмы/1/карточки/Без метки (2015).json").exists());
 
         let _ = fs::remove_dir_all(archive.root());
         let _ = fs::remove_dir_all(source_dir);
@@ -1504,6 +1679,7 @@ mod tests {
         let source_dir = std::env::temp_dir().join(format!("freedom-archive-src-{}", std::process::id()));
         let source = write_source(&source_dir, "cover.png");
         let title = format!("__проверка_{}", std::process::id());
+        let stem = build_file_stem(&title, 2015).unwrap();
 
         struct Cleanup {
             paths: Vec<PathBuf>,
@@ -1524,31 +1700,31 @@ mod tests {
                     .root()
                     .join("игры")
                     .join("пройдено")
-                    .join(format!("{title}.png")),
+                    .join(format!("{stem}.png")),
                 archive
                     .root()
                     .join("игры")
                     .join("брошено")
-                    .join(format!("{title}.png")),
+                    .join(format!("{stem}.png")),
                 source.clone(),
             ],
         };
 
         let added = archive
-            .add(&source, "игры", Some("пройдено"), 4, &title)
+            .add(&source, "игры", Some("пройдено"), 4, &title, 2015)
             .unwrap();
-        assert_eq!(added.relative_path, format!("игры/пройдено/{title}.png"));
+        assert_eq!(added.relative_path, format!("игры/пройдено/{stem}.png"));
         assert_eq!(added.rating, 0);
         let moved = archive
-            .move_entry(&added.relative_path, "игры", Some("брошено"), 1, &title)
+            .move_entry(&added.relative_path, "игры", Some("брошено"), 1, &title, 2015)
             .unwrap();
 
         assert_eq!(moved.rating, 0);
-        assert_eq!(moved.relative_path, format!("игры/брошено/{title}.png"));
+        assert_eq!(moved.relative_path, format!("игры/брошено/{stem}.png"));
         assert!(moved.image_path.contains("Архив"));
         assert!(!moved.image_path.contains("Коллекции"));
-        assert!(archive.root().join("игры/брошено").join(format!("{title}.png")).is_file());
-        assert!(!archive.root().join("игры/пройдено").join(format!("{title}.png")).exists());
+        assert!(archive.root().join("игры/брошено").join(format!("{stem}.png")).is_file());
+        assert!(!archive.root().join("игры/пройдено").join(format!("{stem}.png")).exists());
         assert!(!archive.root().join("игры/пройдено/4").exists());
         assert!(!archive.root().join("игры/брошено/1").exists());
         assert_eq!(count_files(&collections), before);
@@ -1639,14 +1815,14 @@ mod tests {
 
         let source_dir = root.with_extension("src");
         let source = write_source(&source_dir, "cover.png");
-        let added = archive.add(&source, "игры", Some("dlc"), 5, "Дополнение").unwrap();
-        assert_eq!(added.relative_path, "игры/dlc/Дополнение.png");
+        let added = archive.add(&source, "игры", Some("dlc"), 5, "Дополнение", 2015).unwrap();
+        assert_eq!(added.relative_path, "игры/dlc/Дополнение (2015).png");
         assert_eq!(added.rating, 0);
         assert!(!root.join("игры/dlc/5").exists());
         let listed = archive.list().unwrap();
-        assert!(listed.iter().any(|entry| entry.relative_path == "игры/dlc/Дополнение.png" && entry.rating == 0));
+        assert!(listed.iter().any(|entry| entry.relative_path == "игры/dlc/Дополнение (2015).png" && entry.rating == 0));
         assert!(listed.iter().any(|entry| entry.title == "Ведьмак" && entry.subcategory.as_deref() == Some("пройдено") && entry.rating == 0));
-        assert!(archive.add(&source, "игры", Some("android"), 1, "Нет").is_err());
+        assert!(archive.add(&source, "игры", Some("android"), 1, "Нет", 2015).is_err());
 
         let _ = fs::remove_dir_all(archive.root());
         let _ = fs::remove_dir_all(source_dir);

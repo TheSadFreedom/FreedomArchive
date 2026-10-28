@@ -1,9 +1,9 @@
 import { useEffect, useMemo, useRef, useState, type Dispatch, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type SetStateAction } from "react";
-import { deleteEntry, errorText, lookupMeta, moveEntry, updateCard } from "../api";
+import { deleteEntry, errorText, moveEntry, updateCard } from "../api";
 import { Cover } from "./Cover";
+import { PlacementPicker } from "./PlacementPicker";
 import { Stars } from "./Stars";
 import {
-  categories,
   categoryById,
   fieldsFor,
   placement,
@@ -11,6 +11,7 @@ import {
   type FieldDef,
 } from "../schema/categories";
 import type { Entry } from "../types";
+import { fileStem, releaseYear } from "../title";
 
 type CardDialogProps = {
   entry: Entry;
@@ -28,6 +29,7 @@ const hints: Record<string, string> = {
 
 const plainFields = new Set(["genre", "themes", "theme", "summary"]);
 const animeListKeys = new Set(["director", "franchise", "studio", "country"]);
+const queueShelves = new Set(["планы", "ожидание", "пересмотр", "брошено"]);
 
 type ListMode = "single" | "comma" | "lines";
 
@@ -35,9 +37,11 @@ function suggestionKey(value: string): string {
   return value.trim().toLocaleLowerCase("ru");
 }
 
-function listMode(category: string, key: string): ListMode {
+function listMode(category: string, subcategory: string, key: string): ListMode {
   if (key === "actors") return "lines";
-  if (category === "аниме" && animeListKeys.has(key)) return "comma";
+  const queued = queueShelves.has(category);
+  const anime = category === "аниме" || (queued && subcategory === "аниме");
+  if (anime && animeListKeys.has(key)) return "comma";
   return "single";
 }
 
@@ -255,7 +259,6 @@ export function CardDialog({ entry, entries, onClose, onSaved, onDeleted }: Card
   const [fields, setFields] = useState<Record<string, string>>(entry.fields);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
-  const [looking, setLooking] = useState(false);
   const [confirming, setConfirming] = useState(false);
   const formRef = useRef<HTMLFormElement>(null);
 
@@ -266,7 +269,6 @@ export function CardDialog({ entry, entries, onClose, onSaved, onDeleted }: Card
     setRating(entry.rating);
     setFields(entry.fields);
     setError("");
-    setLooking(false);
     setConfirming(false);
   }, [entry]);
 
@@ -296,6 +298,8 @@ export function CardDialog({ entry, entries, onClose, onSaved, onDeleted }: Card
   const subs = current?.subcategories ?? [];
   const fieldDefs = fieldsFor(category, subcategory);
   const rated = usesRating(category);
+  const year = releaseYear(fields.released ?? "");
+  const stem = year && title.trim() ? fileStem(title.trim(), year) : "";
   const folder = useMemo(
     () => placement(category, subs.length ? subcategory : null, rated ? rating : 0),
     [category, subcategory, subs.length, rating, rated],
@@ -309,14 +313,23 @@ export function CardDialog({ entry, entries, onClose, onSaved, onDeleted }: Card
 
   async function save(event: FormEvent) {
     event.preventDefault();
+    const nextTitle = title.trim();
+    const nextReleased = (fields.released ?? "").trim();
+    const nextYear = releaseYear(nextReleased);
+    if (!nextYear) {
+      setError("укажите год в дате выхода");
+      return;
+    }
     setError("");
     setBusy(true);
     try {
-      const nextTitle = title.trim();
       const nextSub = subs.length && subcategory ? subcategory : null;
       const nextRating = rated ? rating : 0;
+      const nextStem = fileStem(nextTitle, nextYear);
+      const currentFile = entry.relativePath.split("/").pop() ?? "";
+      const currentStem = currentFile.replace(/\.[^.]+$/, "");
       const placementChanged =
-        nextTitle !== entry.title.trim() ||
+        nextStem !== currentStem ||
         category !== entry.category ||
         nextSub !== (entry.subcategory ?? null) ||
         nextRating !== entry.rating;
@@ -328,13 +341,17 @@ export function CardDialog({ entry, entries, onClose, onSaved, onDeleted }: Card
           subcategory: nextSub,
           rating: nextRating,
           title: nextTitle,
+          year: nextYear,
         });
         relativePath = moved.relativePath;
       }
-      const payload: Record<string, string> = {};
+      const payload: Record<string, string> = {
+        title: nextTitle,
+      };
       for (const field of fieldDefs) {
         payload[field.key] = fields[field.key] ?? "";
       }
+      payload.released = nextReleased;
       await updateCard(relativePath, payload);
       await onSaved(relativePath);
     } catch (caught) {
@@ -356,44 +373,8 @@ export function CardDialog({ entry, entries, onClose, onSaved, onDeleted }: Card
     }
   }
 
-  async function autoLookup() {
-    const query = title.trim();
-    if (!query) {
-      setError("сначала укажите название");
-      return;
-    }
-    setError("");
-    setLooking(true);
-    try {
-      const found = await lookupMeta(category, query);
-      const allowed = new Set(fieldDefs.map((field) => field.key));
-      setFields((current) => {
-        const next = { ...current };
-        for (const [key, value] of Object.entries(found)) {
-          if (!allowed.has(key) || !value.trim()) continue;
-          next[key] = value;
-        }
-        return next;
-      });
-    } catch (caught) {
-      setError(errorText(caught));
-    } finally {
-      setLooking(false);
-    }
-  }
-
-  const summary = fieldDefs.find((field) => field.key === "summary");
-  const actors = fieldDefs.find((field) => field.key === "actors");
-  const themes = fieldDefs.find((field) => field.key === "themes" || field.key === "theme");
   const altTitle = fieldDefs.find((field) => field.key === "altTitle");
-  const facts = fieldDefs.filter(
-    (field) =>
-      field.key !== "summary" &&
-      field.key !== "actors" &&
-      field.key !== "themes" &&
-      field.key !== "theme" &&
-      field.key !== "altTitle",
-  );
+  const facts = fieldDefs.filter((field) => field.key !== "altTitle");
   const known = useMemo(
     () => suggestionsFrom(entries, entry.relativePath),
     [entries, entry.relativePath],
@@ -404,37 +385,111 @@ export function CardDialog({ entry, entries, onClose, onSaved, onDeleted }: Card
     category === "игры" ||
     category === "манга" ||
     category === "мульт";
-  const canLookup =
-    category === "аниме" ||
-    category === "манга" ||
-    category === "кино" ||
-    category === "мульт" ||
-    category === "игры" ||
-    category === "книги";
   const subTitle = subs.find((item) => item.id === subcategory)?.title;
   const place = [current?.title, subTitle].filter(Boolean).join(" · ");
-  const locked = busy || looking || confirming;
+  const locked = busy || confirming;
 
   return (
-    <form
-      ref={formRef}
-      className="card-page editor"
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby="card-title"
-      onSubmit={save}
-    >
-      <header className="card-page-bar">
-        <button type="button" className="card-icon card-back" aria-label="Назад" onClick={onClose}>
-          <svg viewBox="0 0 24 24" width="28" height="28" aria-hidden="true">
-            <path
-              fill="currentColor"
-              d="M14.8 5.2 8.1 12l6.7 6.8 1.5-1.5L11.1 12l5.2-5.3-1.5-1.5Z"
-            />
-          </svg>
-        </button>
-        <p className="add-kicker">{place || "Карточка"}</p>
-        <div className="editor-actions">
+    <div className="backdrop" onMouseDown={onClose}>
+      <form
+        ref={formRef}
+        className="dialog edit-dialog editor"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="card-title"
+        onMouseDown={(event) => event.stopPropagation()}
+        onSubmit={save}
+      >
+        <header className="add-head">
+          <div>
+            <p className="add-kicker">{place || "Карточка"}</p>
+            <h2 id="edit-heading">Редактирование</h2>
+          </div>
+          <button type="button" className="card-icon" aria-label="Закрыть" onClick={onClose}>
+            <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
+              <path
+                fill="currentColor"
+                d="M6.4 5 12 10.6 17.6 5 19 6.4 13.4 12 19 17.6 17.6 19 12 13.4 6.4 19 5 17.6 10.6 12 5 6.4 6.4 5Z"
+              />
+            </svg>
+          </button>
+        </header>
+
+        <p className="editor-path edit-path">
+          {folder}/{stem || "Название (Год)"}
+        </p>
+
+        <div className="edit-layout">
+          <div className="edit-photo">
+            <div className="edit-cover">
+              <Cover imagePath={entry.imagePath} title={title || entry.title} />
+            </div>
+            {rated && (
+              <div className="add-score">
+                <Stars value={rating} onChange={setRating} />
+              </div>
+            )}
+          </div>
+
+          <div className="edit-fields">
+            <label>
+              <span className="editor-label">Название</span>
+              <input
+                id="card-title"
+                className="add-title"
+                value={title}
+                onChange={(event) => setTitle(event.target.value)}
+                required
+                autoFocus
+              />
+            </label>
+
+            {altTitle && (
+              <label>
+                <span className="editor-label">{altTitle.label}</span>
+                <input
+                  value={fields.altTitle ?? ""}
+                  onChange={(event) =>
+                    setFields((currentFields) => ({
+                      ...currentFields,
+                      altTitle: event.target.value,
+                    }))
+                  }
+                />
+              </label>
+            )}
+
+            {facts.map((field) => (
+              <FieldControl
+                key={field.key}
+                field={field}
+                fields={fields}
+                setFields={setFields}
+                list={listMode(category, subcategory, field.key)}
+                options={
+                  plainFields.has(field.key)
+                    ? []
+                    : (listMode(category, subcategory, field.key) === "single"
+                        ? known.whole[field.key]
+                        : known.listed[field.key]) ?? []
+                }
+              />
+            ))}
+
+            {!focused && (
+              <PlacementPicker
+                category={category}
+                subcategory={subcategory}
+                onCategory={chooseCategory}
+                onSubcategory={setSubcategory}
+              />
+            )}
+          </div>
+        </div>
+
+        {error && <p className="error">{error}</p>}
+
+        <footer className="dialog-actions edit-actions">
           {confirming ? (
             <>
               <span className="editor-confirm">Удалить запись?</span>
@@ -446,147 +501,15 @@ export function CardDialog({ entry, entries, onClose, onSaved, onDeleted }: Card
               </button>
             </>
           ) : (
-            <>
-              {canLookup && (
-                <button
-                  type="button"
-                  className="ghost lookup"
-                  disabled={locked || !title.trim()}
-                  onClick={autoLookup}
-                  title={
-                    category === "аниме" || category === "манга"
-                      ? "Найти на Shikimori"
-                      : category === "кино" || category === "мульт"
-                        ? "Найти на Кинопоиске"
-                        : category === "игры"
-                          ? "Найти в Steam"
-                          : "Найти на LitRes"
-                  }
-                >
-                  {looking ? "Ищу…" : "Авто-поиск"}
-                </button>
-              )}
-              <button type="button" className="ghost danger-quiet" disabled={locked} onClick={() => setConfirming(true)}>
-                Удалить
-              </button>
-            </>
+            <button type="button" className="ghost danger-quiet" disabled={locked} onClick={() => setConfirming(true)}>
+              Удалить
+            </button>
           )}
           <button type="submit" className="primary" disabled={locked || !title.trim()}>
             {busy && !confirming ? "Сохраняю…" : "Сохранить"}
           </button>
-        </div>
-      </header>
-
-      <div className="card-page-body">
-        <aside className="card-poster">
-          <Cover imagePath={entry.imagePath} title={title || entry.title} />
-          {rated && (
-            <div className="card-score">
-              <Stars value={rating} onChange={setRating} />
-            </div>
-          )}
-          <p className="editor-path">
-            {folder}/{title.trim() || "…"}
-          </p>
-        </aside>
-
-        <div className="card-page-main">
-          <div className="card-names">
-            <textarea
-              id="card-title"
-              className="card-name"
-              rows={2}
-              value={title}
-              onChange={(event) => setTitle(event.target.value.replace(/\s*\n\s*/g, " "))}
-              required
-              aria-label="Название"
-              placeholder="Название"
-            />
-            {altTitle && (
-              <textarea
-                className="card-alt"
-                rows={2}
-                value={fields.altTitle ?? ""}
-                onChange={(event) =>
-                  setFields((currentFields) => ({
-                    ...currentFields,
-                    altTitle: event.target.value.replace(/\s*\n\s*/g, " "),
-                  }))
-                }
-                aria-label="Альтернативное название"
-                placeholder="Альтернативное название"
-              />
-            )}
-          </div>
-
-          {!focused && (
-            <div className="editor-place">
-              <label>
-                <span className="editor-label">Категория</span>
-                <select value={category} onChange={(event) => chooseCategory(event.target.value)}>
-                  {categories.map((item) => (
-                    <option key={item.id} value={item.id}>
-                      {item.title}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              {subs.length > 0 && (
-                <label>
-                  <span className="editor-label">Подкатегория</span>
-                  <select value={subcategory} onChange={(event) => setSubcategory(event.target.value)}>
-                    {subs.map((item) => (
-                      <option key={item.id} value={item.id}>
-                        {item.title}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-              )}
-            </div>
-          )}
-
-          {facts.length > 0 && (
-            <div className="editor-grid">
-              {facts.map((field) => (
-                <FieldControl
-                  key={field.key}
-                  field={field}
-                  fields={fields}
-                  setFields={setFields}
-                  list={listMode(category, field.key)}
-                  options={
-                    plainFields.has(field.key)
-                      ? []
-                      : (listMode(category, field.key) === "single" ? known.whole[field.key] : known.listed[field.key]) ??
-                        []
-                  }
-                />
-              ))}
-            </div>
-          )}
-
-          {actors && (
-            <section className="editor-section">
-              <FieldControl field={actors} fields={fields} setFields={setFields} list="lines" options={known.listed.actors ?? []} />
-            </section>
-          )}
-
-          {summary && (
-            <section className="editor-section">
-              <FieldControl field={summary} fields={fields} setFields={setFields} list="single" options={[]} />
-            </section>
-          )}
-
-          {themes && (
-            <section className="editor-section">
-              <FieldControl field={themes} fields={fields} setFields={setFields} list="single" options={[]} />
-            </section>
-          )}
-
-          {error && <p className="error">{error}</p>}
-        </div>
-      </div>
-    </form>
+        </footer>
+      </form>
+    </div>
   );
 }

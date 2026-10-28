@@ -2,10 +2,12 @@ import { useEffect, useMemo, useState, type DragEvent, type FormEvent } from "re
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open } from "@tauri-apps/plugin-dialog";
-import { addEntry, errorText } from "../api";
+import { addEntry, errorText, updateCard } from "../api";
+import { PlacementPicker } from "./PlacementPicker";
 import { Stars } from "./Stars";
 import { categories, categoryById, placement, usesRating } from "../schema/categories";
 import type { Entry } from "../types";
+import { fileStem as archiveStem, releaseYear } from "../title";
 
 type AddDialogProps = {
   initialCategory?: string;
@@ -38,7 +40,7 @@ function PhotoPreview({ src }: { src: string }) {
   useEffect(() => {
     setFailed(false);
   }, [src]);
-  if (!src || failed) return <span className="add-empty">Фото</span>;
+  if (!src || failed) return <span className="add-empty">Обложка</span>;
   return <img src={src} alt="" onError={() => setFailed(true)} />;
 }
 
@@ -53,6 +55,8 @@ export function AddDialog({
   const [link, setLink] = useState("");
   const [mode, setMode] = useState<"file" | "link">("file");
   const [title, setTitle] = useState("");
+  const [altTitle, setAltTitle] = useState("");
+  const [released, setReleased] = useState("");
   const [category, setCategory] = useState(start.id);
   const [subcategory, setSubcategory] = useState(
     initialSubcategory && start.subcategories?.some((item) => item.id === initialSubcategory)
@@ -67,14 +71,20 @@ export function AddDialog({
   const current = categoryById(category);
   const subs = current?.subcategories ?? [];
   const rated = usesRating(category);
+  const place = [current?.title, subs.find((item) => item.id === subcategory)?.title]
+    .filter(Boolean)
+    .join(" · ");
   const folder = useMemo(
     () => placement(category, subs.length ? subcategory || null : null, rated ? rating : 0),
     [category, subcategory, subs.length, rating, rated],
   );
+  const year = releaseYear(released);
+  const stem = year && title.trim() ? archiveStem(title.trim(), year) : "";
   const linkValue = link.trim();
   const usingLink = mode === "link" && linkValue.length > 0;
   const preview = usingLink ? linkValue : sourcePath ? filePreview(sourcePath) : "";
-  const ready = title.trim().length > 0 && (usingLink || sourcePath.length > 0);
+  const ready =
+    title.trim().length > 0 && year !== null && (usingLink || sourcePath.length > 0);
 
   function chooseCategory(id: string) {
     setCategory(id);
@@ -134,6 +144,7 @@ export function AddDialog({
   }
 
   async function chooseFile() {
+    if (mode === "link") return;
     const selected = await open({
       multiple: false,
       directory: false,
@@ -150,16 +161,28 @@ export function AddDialog({
 
   async function submit(event: FormEvent) {
     event.preventDefault();
+    const nextTitle = title.trim();
+    const nextYear = releaseYear(released);
+    if (!nextYear) {
+      setError("укажите год в дате выхода");
+      return;
+    }
     setError("");
     setBusy(true);
     try {
-      const entry = await addEntry({
+      let entry = await addEntry({
         sourcePath: usingLink ? undefined : sourcePath,
         sourceUrl: usingLink ? linkValue : undefined,
         category,
         subcategory: subs.length ? subcategory || null : null,
         rating: rated ? rating : 0,
-        title,
+        title: nextTitle,
+        year: nextYear,
+      });
+      entry = await updateCard(entry.relativePath, {
+        title: nextTitle,
+        altTitle: altTitle.trim(),
+        released: released.trim(),
       });
       await onAdded(entry);
     } catch (caught) {
@@ -178,9 +201,12 @@ export function AddDialog({
         onSubmit={submit}
       >
         <header className="add-head">
-          <div>
-            <p className="add-kicker">Freedom Archive</p>
+          <div className="add-head-text">
+            <p className="add-kicker">{place || "Freedom Archive"}</p>
             <h2 id="add-title">Новая запись</h2>
+            <p className="editor-path edit-path">
+              {folder}/{stem || "Название (Год)"}
+            </p>
           </div>
           <button type="button" className="card-icon" aria-label="Закрыть" onClick={onClose}>
             <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
@@ -196,8 +222,16 @@ export function AddDialog({
           <div className="add-photo">
             <button
               type="button"
-              className={dragging ? "add-frame over" : "add-frame"}
+              className={[
+                "add-frame",
+                dragging ? "over" : "",
+                mode === "link" ? "link-mode" : "",
+                preview ? "has-image" : "",
+              ]
+                .filter(Boolean)
+                .join(" ")}
               onClick={chooseFile}
+              disabled={mode === "link"}
               onDragEnter={(event) => {
                 event.preventDefault();
                 setDragging(true);
@@ -214,91 +248,45 @@ export function AddDialog({
               onDrop={dropFile}
             >
               <PhotoPreview src={preview} />
-              <span className="add-frame-caption">
-                {dragging ? "Отпустите файл" : sourcePath && !usingLink ? "Сменить фото" : "Выбрать или перетащить фото"}
-              </span>
+              {mode !== "link" && (
+                <span className="add-frame-caption">
+                  {dragging
+                    ? "Отпустите файл"
+                    : sourcePath
+                      ? "Сменить обложку"
+                      : "Выбрать или перетащить"}
+                </span>
+              )}
             </button>
-          </div>
-
-          <div className="add-fields">
-            <label>
-              <span className="editor-label">Название</span>
-              <input
-                className="add-title"
-                value={title}
-                onChange={(event) => setTitle(event.target.value)}
-                placeholder="Как будет называться файл"
-                required
-                autoFocus
-              />
-              <span className="hint">Файл переименуется в это название</span>
-            </label>
-
-            <div className="add-block">
-              <p className="editor-label">Категория</p>
-              <div className="filter-options" role="group" aria-label="Категория">
-                {categories.map((item) => (
-                  <button
-                    key={item.id}
-                    type="button"
-                    className={category === item.id ? "filter-option on" : "filter-option"}
-                    onClick={() => chooseCategory(item.id)}
-                  >
-                    {item.title}
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            {subs.length > 0 && (
-              <div className="add-block">
-                <p className="editor-label">Подкатегория</p>
-                <div className="filter-options" role="group" aria-label="Подкатегория">
-                  {subs.map((item) => (
-                    <button
-                      key={item.id}
-                      type="button"
-                      className={subcategory === item.id ? "filter-option on" : "filter-option"}
-                      onClick={() => setSubcategory(item.id)}
-                    >
-                      {item.title}
-                    </button>
-                  ))}
-                </div>
-              </div>
-            )}
 
             {rated && (
-              <div className="add-block">
-                <p className="editor-label">Оценка</p>
-                <div className="add-score">
-                  <Stars value={rating} onChange={setRating} />
-                </div>
+              <div className="add-score">
+                <Stars value={rating} onChange={setRating} />
               </div>
             )}
 
-            <div className="add-block">
-              <p className="editor-label">Источник</p>
-              <div className="add-modes" role="group" aria-label="Источник">
+            <div className="add-source">
+              <div className="place-subs add-modes-bar" role="group" aria-label="Источник обложки">
                 <button
                   type="button"
-                  className={mode === "file" ? "filter-option on" : "filter-option"}
+                  className={mode === "file" ? "place-sub on" : "place-sub"}
                   onClick={() => setMode("file")}
                 >
-                  С диска
+                  Файл
                 </button>
                 <button
                   type="button"
-                  className={mode === "link" ? "filter-option on" : "filter-option"}
+                  className={mode === "link" ? "place-sub on" : "place-sub"}
                   onClick={() => setMode("link")}
                 >
-                  По ссылке
+                  Ссылка
                 </button>
               </div>
               {mode === "link" ? (
                 <input
                   type="url"
                   inputMode="url"
+                  className="add-link"
                   placeholder="https://"
                   value={link}
                   onChange={(event) => {
@@ -307,19 +295,64 @@ export function AddDialog({
                   }}
                 />
               ) : (
-                <p className="hint">{sourcePath ? fileStem(sourcePath) : "Нажмите на обложку или перетащите файл"}</p>
+                <p className="hint">{sourcePath ? fileStem(sourcePath) : "Файл с диска"}</p>
               )}
             </div>
+          </div>
 
-            <p className="editor-path">
-              {folder}/{title.trim() || "…"}
-            </p>
+          <div className="add-fields">
+            <section className="add-sheet">
+              <label className="add-field">
+                <span className="editor-label">Название</span>
+                <input
+                  className="add-title"
+                  value={title}
+                  onChange={(event) => setTitle(event.target.value)}
+                  placeholder="Как называется"
+                  required
+                  autoFocus
+                />
+              </label>
+
+              <div className="add-pair">
+                <label className="add-field">
+                  <span className="editor-label">Второе название</span>
+                  <input
+                    value={altTitle}
+                    onChange={(event) => setAltTitle(event.target.value)}
+                    placeholder="Альтернативное"
+                  />
+                </label>
+                <label className="add-field">
+                  <span className="editor-label">Дата выхода</span>
+                  <input
+                    value={released}
+                    onChange={(event) => setReleased(event.target.value)}
+                    placeholder="2024"
+                    required
+                  />
+                </label>
+              </div>
+            </section>
+
+            <section className="add-sheet">
+              <p className="editor-label">Полка</p>
+              <PlacementPicker
+                category={category}
+                subcategory={subcategory}
+                onCategory={chooseCategory}
+                onSubcategory={setSubcategory}
+              />
+            </section>
           </div>
         </div>
 
         {error && <p className="error">{error}</p>}
 
-        <footer className="dialog-actions">
+        <footer className="dialog-actions add-foot">
+          <button type="button" className="ghost" disabled={busy} onClick={onClose}>
+            Отмена
+          </button>
           <button type="submit" className="primary" disabled={busy || !ready}>
             {busy ? (usingLink ? "Скачиваю…" : "Сохраняю…") : "Добавить"}
           </button>

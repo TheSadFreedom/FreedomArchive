@@ -6,6 +6,10 @@ const icons: Record<string, string> = {
   мульт: "/icons/mult.svg",
   стендап: "/icons/mocrophone.svg",
   книги: "/icons/book.svg",
+  планы: "/icons/plans.png",
+  ожидание: "/icons/wait.png",
+  пересмотр: "/icons/rewatch.png",
+  брошено: "/icons/dropped.png",
 };
 
 type CategoryIconProps = {

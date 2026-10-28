@@ -32,6 +32,7 @@ fn add_entry(
     subcategory: Option<String>,
     rating: u8,
     title: String,
+    year: u16,
 ) -> Result<archive::Entry, String> {
     let sub = placement_sub(subcategory);
     let url = source_url
@@ -46,6 +47,7 @@ fn add_entry(
             sub.as_deref(),
             rating,
             &title,
+            year,
         );
         let _ = std::fs::remove_file(&temp);
         return saved;
@@ -61,6 +63,7 @@ fn add_entry(
         sub.as_deref(),
         rating,
         &title,
+        year,
     )
 }
 
@@ -86,6 +89,7 @@ fn move_entry(
     subcategory: Option<String>,
     rating: u8,
     title: String,
+    year: u16,
 ) -> Result<archive::Entry, String> {
     archive.move_entry(
         &relative_path,
@@ -93,12 +97,30 @@ fn move_entry(
         placement_sub(subcategory).as_deref(),
         rating,
         &title,
+        year,
     )
 }
 
 #[tauri::command]
-fn lookup_meta(category: String, title: String) -> Result<BTreeMap<String, String>, String> {
-    lookup::lookup(&category, &title)
+fn lookup_meta(
+    category: String,
+    subcategory: Option<String>,
+    title: String,
+) -> Result<BTreeMap<String, String>, String> {
+    lookup::lookup(&category, subcategory.as_deref(), &title)
+}
+
+#[tauri::command]
+fn lookup_frame(
+    category: String,
+    subcategory: Option<String>,
+    title: String,
+) -> Result<Option<String>, String> {
+    Ok(lookup::media_frame(
+        &category,
+        subcategory.as_deref(),
+        &title,
+    ))
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -119,7 +141,8 @@ pub fn run() {
             update_card,
             move_entry,
             delete_entry,
-            lookup_meta
+            lookup_meta,
+            lookup_frame
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

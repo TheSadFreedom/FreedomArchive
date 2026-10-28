@@ -20,47 +20,20 @@ export type Category = {
   rated?: boolean;
 };
 
-const summary: FieldDef = { key: "summary", label: "Краткое описание", kind: "textarea" };
-
 const altTitle: FieldDef = { key: "altTitle", label: "Альтернативное название", kind: "text" };
 
-const genre: FieldDef = { key: "genre", label: "Жанр", kind: "text" };
+const released: FieldDef = { key: "released", label: "Дата выхода", kind: "text" };
 
-const franchise: FieldDef = { key: "franchise", label: "Франшиза", kind: "text" };
+const infoFields: FieldDef[] = [altTitle, released];
 
-const screenFields: FieldDef[] = [
-  summary,
-  altTitle,
-  genre,
-  { key: "released", label: "Дата выхода", kind: "text" },
-  { key: "country", label: "Страна", kind: "text" },
-  { key: "runtime", label: "Время", kind: "text" },
-  { key: "ageRating", label: "Возрастной рейтинг", kind: "text" },
-  { key: "mpaa", label: "Возрастной рейтинг MPAA", kind: "text" },
-  { key: "director", label: "Режиссёр", kind: "text" },
-  { key: "screenplay", label: "Сценарий", kind: "text" },
-  { key: "producer", label: "Продюсер", kind: "text" },
-  { key: "actors", label: "Актёры", kind: "textarea" },
-  { key: "studio", label: "Студия", kind: "text" },
-  franchise,
-  { key: "budget", label: "Бюджет", kind: "text" },
-  { key: "boxOffice", label: "Сборы", kind: "text" },
+const queueSubs: Subcategory[] = [
+  { id: "аниме", title: "Аниме", fields: infoFields },
+  { id: "фильмы", title: "Фильмы", fields: infoFields },
+  { id: "сериалы", title: "Сериалы", fields: infoFields },
+  { id: "мультфильмы", title: "Мультфильмы", fields: infoFields },
+  { id: "мультсериалы", title: "Мультсериалы", fields: infoFields },
+  { id: "книги", title: "Книги", fields: infoFields },
 ];
-
-const summaryAndYear: FieldDef[] = [
-  summary,
-  { key: "year", label: "Год", kind: "number" },
-];
-
-const seriesFields: FieldDef[] = (() => {
-  const episodes: FieldDef = { key: "episodes", label: "Количество серий", kind: "number" };
-  const runtimeAt = screenFields.findIndex((field) => field.key === "runtime");
-  return [
-    ...screenFields.slice(0, runtimeAt + 1),
-    episodes,
-    ...screenFields.slice(runtimeAt + 1),
-  ];
-})();
 
 export const RATINGS = [0, 1, 2, 3, 4, 5] as const;
 
@@ -79,15 +52,7 @@ export const categories: Category[] = [
       { id: "моды", title: "Моды" },
       { id: "ntfs", title: "NTFS" },
     ],
-    fields: [
-      summary,
-      genre,
-      { key: "theme", label: "Тема", kind: "text" },
-      { key: "released", label: "Дата выхода", kind: "text" },
-      { key: "developer", label: "Разработчик", kind: "text" },
-      { key: "publisher", label: "Издатель", kind: "text" },
-      franchise,
-    ],
+    fields: infoFields,
   },
   {
     id: "аниме",
@@ -98,20 +63,7 @@ export const categories: Category[] = [
       { id: "ova", title: "OVA" },
       { id: "хентай", title: "Хентай" },
     ],
-    fields: [
-      summary,
-      altTitle,
-      genre,
-      { key: "released", label: "Дата выхода", kind: "text" },
-      { key: "country", label: "Страна", kind: "text" },
-      { key: "episodes", label: "Эпизоды", kind: "number" },
-      { key: "duration", label: "Длительность", kind: "text" },
-      { key: "ageRating", label: "Возрастной рейтинг", kind: "text" },
-      { key: "origin", label: "Первоисточник", kind: "text" },
-      { key: "studio", label: "Студия", kind: "text" },
-      { key: "director", label: "Режиссёр", kind: "text" },
-      franchise,
-    ],
+    fields: infoFields,
   },
   {
     id: "манга",
@@ -120,50 +72,50 @@ export const categories: Category[] = [
       { id: "манга", title: "Манга" },
       { id: "хентай", title: "Хентай" },
     ],
-    fields: [
-      summary,
-      altTitle,
-      genre,
-      { key: "kind", label: "Тип", kind: "text" },
-      { key: "released", label: "Дата", kind: "text" },
-      { key: "chapters", label: "Количество глав", kind: "number" },
-      franchise,
-    ],
+    fields: infoFields,
   },
   {
     id: "кино",
     title: "Кино",
     subcategories: [
-      { id: "фильмы", title: "Фильмы", fields: screenFields },
-      { id: "сериалы", title: "Сериалы", fields: seriesFields },
+      { id: "фильмы", title: "Фильмы" },
+      { id: "сериалы", title: "Сериалы" },
     ],
-    fields: screenFields,
+    fields: infoFields,
   },
   {
     id: "мульт",
     title: "Мульт",
     subcategories: [
-      { id: "мультфильмы", title: "Мультфильмы", fields: screenFields },
-      { id: "мультсериалы", title: "Мультсериалы", fields: seriesFields },
+      { id: "мультфильмы", title: "Мультфильмы" },
+      { id: "мультсериалы", title: "Мультсериалы" },
     ],
-    fields: screenFields,
+    fields: infoFields,
   },
   {
     id: "стендап",
     title: "Стендап",
-    fields: [...summaryAndYear],
+    fields: infoFields,
   },
   {
     id: "книги",
     title: "Книги",
-    fields: [
-      summary,
-      { key: "author", label: "Автор", kind: "text" },
-      { key: "year", label: "Год", kind: "number" },
-      { key: "pages", label: "Страниц", kind: "number" },
-      franchise,
-    ],
+    fields: infoFields,
   },
+  ...[
+    { id: "планы", title: "Планы" },
+    { id: "ожидание", title: "Ожидание" },
+    { id: "пересмотр", title: "Пересмотр" },
+    { id: "брошено", title: "Брошено" },
+  ].map(
+    (item): Category => ({
+      id: item.id,
+      title: item.title,
+      rated: false,
+      subcategories: queueSubs,
+      fields: infoFields,
+    }),
+  ),
 ];
 
 export function categoryById(id: string): Category | undefined {

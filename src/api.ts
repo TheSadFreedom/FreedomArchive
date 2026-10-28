@@ -12,6 +12,7 @@ export function addEntry(args: {
   subcategory: string | null;
   rating: number;
   title: string;
+  year: number;
 }): Promise<Entry> {
   return invoke<Entry>("add_entry", args);
 }
@@ -33,15 +34,9 @@ export function moveEntry(args: {
   subcategory: string | null;
   rating: number;
   title: string;
+  year: number;
 }): Promise<Entry> {
   return invoke<Entry>("move_entry", args);
-}
-
-export function lookupMeta(
-  category: string,
-  title: string,
-): Promise<Record<string, string>> {
-  return invoke<Record<string, string>>("lookup_meta", { category, title });
 }
 
 export function errorText(error: unknown): string {

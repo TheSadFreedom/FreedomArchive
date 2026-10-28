@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::io::Read;
 
 use serde_json::Value;
@@ -7,7 +7,147 @@ use crate::net;
 
 type Fields = BTreeMap<String, String>;
 
-pub fn lookup(category: &str, title: &str) -> Result<Fields, String> {
+pub fn media_frame(category: &str, subcategory: Option<&str>, title: &str) -> Option<String> {
+    let title = title.trim();
+    if title.is_empty() || title.chars().count() > 200 {
+        return None;
+    }
+    let source = match category {
+        "планы" | "ожидание" | "пересмотр" | "брошено" => match subcategory.unwrap_or("").trim() {
+            "аниме" => "аниме",
+            "фильмы" | "сериалы" | "мультфильмы" | "мультсериалы" => "кино",
+            _ => return None,
+        },
+        "аниме" => "аниме",
+        "игры" => "игры",
+        "кино" | "мульт" => "кино",
+        _ => return None,
+    };
+    match source {
+        "аниме" => shikimori_frame(title),
+        "игры" => byrutgame_frame(title),
+        "кино" => kinopoisk_frame(title),
+        _ => None,
+    }
+}
+
+fn shikimori_frame(title: &str) -> Option<String> {
+    let ua = "FreedomArchive";
+    let search_url = format!(
+        "https://shikimori.io/api/animes?search={}&limit=1&censored=false",
+        net::encode_query(title)
+    );
+    let list = net::get_json(&search_url, ua).ok()?;
+    let id = list
+        .as_array()
+        .and_then(|items| items.first())
+        .and_then(|item| {
+            item.get("id")
+                .and_then(|value| value.as_u64().or_else(|| value.as_i64().map(|n| n as u64)))
+        })?;
+    let shots = net::get_json(&format!("https://shikimori.io/api/animes/{id}/screenshots"), ua).ok()?;
+    let items = shots.as_array().filter(|items| !items.is_empty())?;
+    let index = random_index(items.len());
+    let path = items
+        .get(index)
+        .and_then(|item| text_field(item, "original").or_else(|| text_field(item, "preview")))?;
+    absolute_http_url(path, "https://shikimori.io")
+}
+
+fn byrutgame_frame(title: &str) -> Option<String> {
+    let html = byrutgame_open(title).ok()?;
+    let shots = byrutgame_screenshots(&html);
+    if shots.is_empty() {
+        return None;
+    }
+    let index = random_index(shots.len());
+    shots.get(index).cloned()
+}
+
+fn kinopoisk_frame(title: &str) -> Option<String> {
+    let agent = net::agent().ok()?;
+    open_kinopoisk_session(&agent).ok()?;
+    let (query, year) = split_title_year(title);
+    let id = find_kinopoisk_id(&agent, &query, year).ok()?;
+    let mut html =
+        net::browser_agent_get(&agent, &format!("https://www.kinopoisk.ru/film/{id}/stills/")).ok()?;
+    if html.contains("sso.kinopoisk.ru/install") {
+        open_kinopoisk_session(&agent).ok()?;
+        html = net::browser_agent_get(&agent, &format!("https://www.kinopoisk.ru/film/{id}/stills/")).ok()?;
+    }
+    let urls = kinopoisk_still_urls(&html);
+    if urls.is_empty() {
+        return None;
+    }
+    let index = random_index(urls.len());
+    urls.get(index).cloned()
+}
+
+fn kinopoisk_still_urls(html: &str) -> Vec<String> {
+    let mut urls = Vec::new();
+    let mut seen = HashSet::new();
+    let bytes = html.as_bytes();
+    let marker = b"get-kinopoisk-image/";
+    let mut offset = 0;
+    while let Some(rel) = bytes[offset..]
+        .windows(marker.len())
+        .position(|window| window == marker)
+    {
+        let start = offset + rel;
+        let tail = &html[start..];
+        let end = tail
+            .find(|ch: char| ch == '"' || ch == '\'' || ch == ')' || ch == ' ' || ch == '\\' || ch == '?')
+            .unwrap_or(tail.len().min(120));
+        let token = &tail[..end];
+        offset = start + marker.len();
+        // get-kinopoisk-image/{folder}/{uuid}/{size}
+        let parts: Vec<&str> = token.split('/').collect();
+        if parts.len() < 4 {
+            continue;
+        }
+        let folder = parts[1];
+        let uuid = parts[2];
+        if folder.is_empty()
+            || uuid.len() < 8
+            || !folder.chars().all(|ch| ch.is_ascii_digit())
+            || !uuid.chars().all(|ch| ch.is_ascii_hexdigit() || ch == '-')
+        {
+            continue;
+        }
+        let key = format!("{folder}/{uuid}");
+        if !seen.insert(key) {
+            continue;
+        }
+        urls.push(format!(
+            "https://avatars.mds.yandex.net/get-kinopoisk-image/{folder}/{uuid}/orig"
+        ));
+    }
+    urls
+}
+
+fn absolute_http_url(path: &str, host: &str) -> Option<String> {
+    if path.starts_with("http://") || path.starts_with("https://") {
+        Some(path.to_string())
+    } else if path.starts_with('/') {
+        Some(format!("{host}{path}"))
+    } else {
+        None
+    }
+}
+
+fn random_index(len: usize) -> usize {
+    if len <= 1 {
+        return 0;
+    }
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let tick = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|value| value.as_nanos())
+        .unwrap_or(0);
+    (tick as usize).wrapping_mul(0x9E37_79B9) % len
+}
+
+pub fn lookup(category: &str, subcategory: Option<&str>, title: &str) -> Result<Fields, String> {
     let title = title.trim();
     if title.is_empty() {
         return Err("сначала укажите название".into());
@@ -15,11 +155,20 @@ pub fn lookup(category: &str, title: &str) -> Result<Fields, String> {
     if title.chars().count() > 200 {
         return Err("слишком длинное название для поиска".into());
     }
-    match category {
+    let source = match category {
+        "планы" | "ожидание" | "пересмотр" | "брошено" => match subcategory.unwrap_or("").trim() {
+            "аниме" => "аниме",
+            "фильмы" | "сериалы" | "мультфильмы" | "мультсериалы" => "кино",
+            "книги" => "книги",
+            _ => return Err("для этой подкатегории авто-поиск недоступен".into()),
+        },
+        other => other,
+    };
+    match source {
         "аниме" => shikimori("animes", title),
         "манга" => shikimori("mangas", title),
         "кино" | "мульт" => kinopoisk(title),
-        "игры" => steam(title),
+        "игры" => byrutgame(title),
         "книги" => litres(title),
         _ => Err("для этой категории авто-поиск недоступен".into()),
     }
@@ -92,6 +241,69 @@ fn join_names(items: &[String]) -> String {
         .join(", ")
 }
 
+fn label_key(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| match ch {
+            'ё' | 'Ё' => 'е',
+            other => other,
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
+}
+
+fn dedupe_labels(items: impl IntoIterator<Item = String>) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    for item in items {
+        let trimmed = item.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let key = label_key(trimmed);
+        if key.is_empty() || !seen.insert(key) {
+            continue;
+        }
+        out.push(trimmed.to_string());
+    }
+    out
+}
+
+fn take_bytes<'a>(value: &'a str, max_bytes: usize) -> &'a str {
+    if value.len() <= max_bytes {
+        return value;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    &value[..end]
+}
+
+fn title_match_score(query: &str, candidate: &str) -> i32 {
+    let query = label_key(query);
+    let candidate = label_key(candidate);
+    if query.is_empty() || candidate.is_empty() {
+        return 0;
+    }
+    if query == candidate {
+        return 1000;
+    }
+    if candidate.starts_with(&query) || query.starts_with(&candidate) {
+        return 800 - (candidate.len() as i32 - query.len() as i32).abs();
+    }
+    if candidate.contains(&query) {
+        return 500 - candidate.len() as i32;
+    }
+    if query.contains(&candidate) {
+        return 400 - (query.len() as i32 - candidate.len() as i32).abs();
+    }
+    0
+}
+
 fn text_field<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
     value.get(key).and_then(|item| item.as_str()).map(str::trim).filter(|item| !item.is_empty())
 }
@@ -137,24 +349,35 @@ fn shikimori(kind: &str, title: &str) -> Result<Fields, String> {
         put(&mut fields, "summary", strip_bbcode(description));
     }
 
-    let genres = detail
-        .get("genres")
-        .and_then(|value| value.as_array())
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(|item| text_field(item, "russian").map(str::to_string))
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    put(&mut fields, "genre", join_names(&genres));
+    let mut genres = shikimori_genre_labels(kind, id, ua);
+    if genres.is_empty() {
+        genres = detail
+            .get("genres")
+            .and_then(|value| value.as_array())
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| text_field(item, "russian").map(str::to_string))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+    }
 
     if let Some(aired) = text_field(&detail, "aired_on").or_else(|| text_field(&detail, "released_on")) {
         put(&mut fields, "released", format_date(aired));
     }
 
     if kind == "animes" {
-        put(&mut fields, "country", "Япония");
+        genres.extend(yummyanime_genre_labels(title));
+        genres.extend(animego_genre_labels(title));
+        if let Some(kind_value) = text_field(&detail, "kind") {
+            put(&mut fields, "kind", map_anime_kind(kind_value));
+        }
+        if let Some(country) = anixart_country(title) {
+            put(&mut fields, "country", country);
+        } else {
+            put(&mut fields, "country", "Япония");
+        }
         if let Some(episodes) = detail.get("episodes").and_then(|value| value.as_u64()) {
             if episodes > 0 {
                 put(&mut fields, "episodes", episodes.to_string());
@@ -221,9 +444,7 @@ fn shikimori(kind: &str, title: &str) -> Result<Fields, String> {
         }
     }
 
-    if let Some(franchise) = text_field(&detail, "franchise") {
-        put(&mut fields, "franchise", humanize_slug(franchise));
-    }
+    put(&mut fields, "genre", join_names(&dedupe_labels(genres)));
 
     if fields.is_empty() {
         Err("на Shikimori мало данных для подстановки".into())
@@ -232,13 +453,279 @@ fn shikimori(kind: &str, title: &str) -> Result<Fields, String> {
     }
 }
 
+fn shikimori_graphql(body: &str, ua: &str) -> Option<Value> {
+    let agent = net::agent().ok()?;
+    let response = agent
+        .post("https://shikimori.io/api/graphql")
+        .set("User-Agent", ua)
+        .set("Content-Type", "application/json")
+        .set("Accept", "application/json")
+        .send_string(body)
+        .ok()?;
+    let mut bytes = Vec::new();
+    response.into_reader().take(256 * 1024).read_to_end(&mut bytes).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+fn shikimori_genre_labels(kind: &str, id: u64, ua: &str) -> Vec<String> {
+    // REST omits many theme tags; GraphQL returns genre + theme (+ demographic under «Жанры»).
+    let root = if kind == "animes" { "animes" } else { "mangas" };
+    let body = format!(
+        r#"{{"query":"query {{ {root}(ids: \"{id}\", limit: 1) {{ genres {{ russian kind }} }} }}"}}"#
+    );
+    let json = match shikimori_graphql(&body, ua) {
+        Some(value) => value,
+        None => return Vec::new(),
+    };
+    let path = format!("/data/{root}/0/genres");
+    json.pointer(&path)
+        .and_then(|value| value.as_array())
+        .into_iter()
+        .flatten()
+        .filter(|item| {
+            matches!(
+                text_field(item, "kind"),
+                Some("genre") | Some("theme") | Some("demographic")
+            )
+        })
+        .filter_map(|item| text_field(item, "russian").map(str::to_string))
+        .collect()
+}
+
+fn anixart_country(title: &str) -> Option<String> {
+    let agent = net::agent().ok()?;
+    let body = format!(r#"{{"query":{}}}"#, serde_json::to_string(title).ok()?);
+    let text = net::agent_post_json(
+        &agent,
+        "https://api-s.anixsekai.com/search/releases/0",
+        "AnixartApp/9.0 (Android; mobile)",
+        &body,
+    )
+    .ok()?;
+    let json: Value = serde_json::from_str(&text).ok()?;
+    let list = json
+        .get("content")
+        .or_else(|| json.get("releases"))
+        .and_then(|value| value.as_array())?;
+    let mut best: Option<(i32, String)> = None;
+    for item in list {
+        let ru = text_field(item, "title_ru").unwrap_or("");
+        let original = text_field(item, "title_original").unwrap_or("");
+        let score = title_match_score(title, ru).max(title_match_score(title, original));
+        if score < 400 {
+            continue;
+        }
+        let Some(country) = text_field(item, "country").map(str::to_string) else {
+            continue;
+        };
+        if best
+            .as_ref()
+            .map(|(best_score, _)| score > *best_score)
+            .unwrap_or(true)
+        {
+            best = Some((score, country));
+        }
+    }
+    best.map(|(_, country)| country)
+}
+
+fn yummyanime_genre_labels(title: &str) -> Vec<String> {
+    let agent = match net::agent() {
+        Ok(agent) => agent,
+        Err(_) => return Vec::new(),
+    };
+    let search_url = format!(
+        "https://api.yani.tv/search?q={}&limit=8",
+        net::encode_query(title)
+    );
+    let search = match net::agent_get_text(
+        &agent,
+        &search_url,
+        net::browser_ua(),
+        "application/json",
+    ) {
+        Ok(text) => text,
+        Err(_) => return Vec::new(),
+    };
+    let json: Value = match serde_json::from_str(&search) {
+        Ok(value) => value,
+        Err(_) => return Vec::new(),
+    };
+    let list = json
+        .get("response")
+        .and_then(|value| value.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let mut best: Option<(i32, u64)> = None;
+    for item in &list {
+        let candidate = text_field(item, "title").unwrap_or("");
+        let score = title_match_score(title, candidate);
+        if score < 400 {
+            continue;
+        }
+        let id = item
+            .get("anime_id")
+            .and_then(|value| value.as_u64().or_else(|| value.as_i64().map(|n| n as u64)));
+        let Some(id) = id else { continue };
+        if best
+            .as_ref()
+            .map(|(best_score, _)| score > *best_score)
+            .unwrap_or(true)
+        {
+            best = Some((score, id));
+        }
+    }
+    let Some((_, id)) = best else {
+        return Vec::new();
+    };
+    let detail_url = format!("https://api.yani.tv/anime/{id}");
+    let detail = match net::agent_get_text(
+        &agent,
+        &detail_url,
+        net::browser_ua(),
+        "application/json",
+    ) {
+        Ok(text) => text,
+        Err(_) => return Vec::new(),
+    };
+    let json: Value = match serde_json::from_str(&detail) {
+        Ok(value) => value,
+        Err(_) => return Vec::new(),
+    };
+    let item = json.get("response").unwrap_or(&json);
+    item.get("genres")
+        .and_then(|value| value.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|genre| text_field(genre, "title").map(str::to_string))
+        .collect()
+}
+
+fn animego_genre_labels(title: &str) -> Vec<String> {
+    let agent = match net::agent() {
+        Ok(agent) => agent,
+        Err(_) => return Vec::new(),
+    };
+    let search_url = format!(
+        "https://animego.me/search/anime?q={}",
+        net::encode_query(title)
+    );
+    let html = match net::browser_agent_get(&agent, &search_url) {
+        Ok(text) => text,
+        Err(_) => return Vec::new(),
+    };
+    let mut best: Option<(i32, String)> = None;
+    let mut offset = 0;
+    while let Some(start) = html[offset..].find("href=\"/anime/") {
+        let abs = offset + start + "href=\"".len();
+        let Some(end) = html[abs..].find('"') else { break };
+        let path = &html[abs..abs + end];
+        offset = abs + end;
+        if !path.starts_with("/anime/")
+            || path.contains("/genre/")
+            || path.contains("/status/")
+            || path.contains("/season/")
+            || path.contains("/random")
+            || path.ends_with("/top-250")
+        {
+            continue;
+        }
+        let slug = path.trim_start_matches("/anime/");
+        let has_id = slug
+            .rsplit_once('-')
+            .map(|(_, id)| !id.is_empty() && id.chars().all(|ch| ch.is_ascii_digit()))
+            .unwrap_or(false);
+        if !has_id {
+            continue;
+        }
+        let tail = take_bytes(&html[abs + end..], 800);
+        let name = if let Some(alt_at) = tail.find("alt=\"") {
+            let from = alt_at + 5;
+            tail[from..]
+                .find('"')
+                .map(|to| strip_html(&tail[from..from + to]))
+        } else {
+            None
+        };
+        let Some(name) = name.filter(|value| !value.is_empty()) else {
+            continue;
+        };
+        let score = title_match_score(title, &name);
+        if score < 400 {
+            continue;
+        }
+        if best
+            .as_ref()
+            .map(|(best_score, _)| score > *best_score)
+            .unwrap_or(true)
+        {
+            best = Some((score, path.to_string()));
+        }
+    }
+    let Some((_, path)) = best else {
+        return Vec::new();
+    };
+    let page = match net::browser_agent_get(&agent, &format!("https://animego.me{path}")) {
+        Ok(text) => text,
+        Err(_) => return Vec::new(),
+    };
+    animego_page_genres(&page)
+}
+
+fn animego_page_genres(html: &str) -> Vec<String> {
+    let mut labels = Vec::new();
+    for marker in ["entity-field__genres", "entity-field__themes", "entity-field__theme"] {
+        let Some(start) = html.find(marker) else { continue };
+        let slice = &html[start..];
+        let end = slice.find("</div>")
+            .and_then(|first| slice[first + 6..].find("</div>").map(|second| first + 6 + second))
+            .unwrap_or(slice.len().min(2500));
+        let block = &slice[..end];
+        let mut offset = 0;
+        while let Some(href_at) = block[offset..].find("href=\"") {
+            let abs = offset + href_at + 6;
+            let Some(href_end) = block[abs..].find('"') else { break };
+            let href = &block[abs..abs + href_end];
+            offset = abs + href_end;
+            if !(href.contains("/genre/") || href.contains("/theme/") || href.contains("/tag/")) {
+                continue;
+            }
+            let after = &block[offset..];
+            let Some(text_start) = after.find('>') else { continue };
+            let from = text_start + 1;
+            let Some(text_end) = after[from..].find('<') else { continue };
+            let label = strip_html(after[from..from + text_end].trim());
+            if !label.is_empty() {
+                labels.push(label);
+            }
+            offset += from + text_end;
+        }
+    }
+    if !labels.is_empty() {
+        return labels;
+    }
+    // Fallback: JSON-LD genre array on AnimeGO pages.
+    if let Some(start) = html.find(r#""genre":["#) {
+        let slice = &html[start + 9..];
+        if let Some(end) = slice.find(']') {
+            for part in slice[..end].split(',') {
+                let cleaned = part.trim().trim_matches('"');
+                if !cleaned.is_empty() {
+                    labels.push(html_entities(cleaned));
+                }
+            }
+        }
+    }
+    labels
+}
+
 fn map_shiki_rating(value: &str) -> String {
-    // As shown on shikimori.io: «Рейтинг: PG-13»
+    // As shown on shikimori.io: «Рейтинг: PG-13», «R-17», «R+»
     match value {
         "g" => "G".into(),
         "pg" => "PG".into(),
         "pg_13" => "PG-13".into(),
-        "r" => "R".into(),
+        "r" => "R-17".into(),
         "r_plus" => "R+".into(),
         "rx" => "Rx".into(),
         "none" => String::new(),
@@ -251,17 +738,7 @@ fn shikimori_origin(id: u64, ua: &str) -> Option<String> {
     let body = format!(
         r#"{{"query":"query {{ animes(ids: \"{id}\", limit: 1) {{ origin }} }}"}}"#
     );
-    let agent = net::agent().ok()?;
-    let response = agent
-        .post("https://shikimori.io/api/graphql")
-        .set("User-Agent", ua)
-        .set("Content-Type", "application/json")
-        .set("Accept", "application/json")
-        .send_string(&body)
-        .ok()?;
-    let mut bytes = Vec::new();
-    response.into_reader().take(64 * 1024).read_to_end(&mut bytes).ok()?;
-    let json: Value = serde_json::from_slice(&bytes).ok()?;
+    let json = shikimori_graphql(&body, ua)?;
     let origin = json
         .pointer("/data/animes/0/origin")
         .and_then(|value| value.as_str())?;
@@ -323,6 +800,22 @@ fn format_date(value: &str) -> String {
     }
 }
 
+fn map_anime_kind(value: &str) -> String {
+    // Labels as on shikimori.io «Тип: …»
+    match value {
+        "tv" => "TV Сериал".into(),
+        "movie" => "Фильм".into(),
+        "ova" => "OVA".into(),
+        "ona" => "ONA".into(),
+        "special" => "Спешл".into(),
+        "tv_special" => "TV Спешл".into(),
+        "music" => "Клип".into(),
+        "pv" => "Проморолик".into(),
+        "cm" => "Реклама".into(),
+        other => other.to_string(),
+    }
+}
+
 fn map_manga_kind(value: &str) -> String {
     match value {
         "manga" => "Манга".into(),
@@ -334,21 +827,6 @@ fn map_manga_kind(value: &str) -> String {
         "doujin" => "Додзинси".into(),
         other => other.to_string(),
     }
-}
-
-fn humanize_slug(value: &str) -> String {
-    value
-        .split(|ch: char| ch == '_' || ch == '-')
-        .filter(|part| !part.is_empty())
-        .map(|part| {
-            let mut chars = part.chars();
-            match chars.next() {
-                Some(first) => format!("{}{}", first.to_uppercase(), chars.as_str()),
-                None => String::new(),
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
 }
 
 fn kinopoisk(title: &str) -> Result<Fields, String> {
@@ -746,19 +1224,19 @@ fn format_russian_date(value: &str) -> String {
 }
 
 fn russian_month(value: &str) -> Option<&'static str> {
-    match value.to_lowercase().as_str() {
-        "января" | "январь" => Some("01"),
-        "февраля" | "февраль" => Some("02"),
-        "марта" | "март" => Some("03"),
-        "апреля" | "апрель" => Some("04"),
+    match value.trim_end_matches('.').to_lowercase().as_str() {
+        "января" | "январь" | "янв" => Some("01"),
+        "февраля" | "февраль" | "фев" => Some("02"),
+        "марта" | "март" | "мар" => Some("03"),
+        "апреля" | "апрель" | "апр" => Some("04"),
         "мая" | "май" => Some("05"),
-        "июня" | "июнь" => Some("06"),
-        "июля" | "июль" => Some("07"),
-        "августа" | "август" => Some("08"),
-        "сентября" | "сентябрь" => Some("09"),
-        "октября" | "октябрь" => Some("10"),
-        "ноября" | "ноябрь" => Some("11"),
-        "декабря" | "декабрь" => Some("12"),
+        "июня" | "июнь" | "июн" => Some("06"),
+        "июля" | "июль" | "июл" => Some("07"),
+        "августа" | "август" | "авг" => Some("08"),
+        "сентября" | "сентябрь" | "сент" => Some("09"),
+        "октября" | "октябрь" | "окт" => Some("10"),
+        "ноября" | "ноябрь" | "ноя" | "нояб" => Some("11"),
+        "декабря" | "декабрь" | "дек" => Some("12"),
         _ => None,
     }
 }
@@ -798,101 +1276,185 @@ fn extract_json_string(source: &str, key: &str) -> Option<String> {
     }
 }
 
-fn steam(title: &str) -> Result<Fields, String> {
-    let search_url = format!(
-        "https://store.steampowered.com/api/storesearch/?term={}&l=russian&cc=RU",
-        net::encode_query(title)
-    );
-    let search = net::browser_get_json(&search_url)?;
-    let items = search
-        .get("items")
-        .and_then(|value| value.as_array())
-        .ok_or_else(|| "Steam вернул странный ответ".to_string())?;
-    let app = items
-        .iter()
-        .find(|item| item.get("type").and_then(|value| value.as_str()) == Some("app"))
-        .or_else(|| items.first())
-        .ok_or_else(|| "в Steam ничего не найдено".to_string())?;
-    let appid = app
-        .get("id")
-        .and_then(|value| value.as_u64())
-        .ok_or_else(|| "в Steam странный ответ".to_string())?;
-
-    let detail_url = format!("https://store.steampowered.com/api/appdetails?appids={appid}&l=russian");
-    let detail = net::browser_get_json(&detail_url)?;
-    let data = detail
-        .get(appid.to_string())
-        .and_then(|value| value.get("data"))
-        .ok_or_else(|| "Steam не отдал карточку игры".to_string())?;
-
+fn byrutgame(title: &str) -> Result<Fields, String> {
+    let html = byrutgame_open(title)?;
     let mut fields = Fields::new();
-    if let Some(summary) = text_field(data, "short_description") {
-        put(&mut fields, "summary", strip_html(summary));
-    } else if let Some(summary) = text_field(data, "detailed_description") {
-        put(&mut fields, "summary", strip_html(summary));
+
+    if let Some(summary) = byrutgame_meta(&html, "og:description")
+        .or_else(|| byrutgame_meta(&html, "description"))
+    {
+        put(&mut fields, "summary", summary);
     }
 
-    let genres = data
-        .get("genres")
-        .and_then(|value| value.as_array())
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(|item| text_field(item, "description").map(str::to_string))
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
+    let genres = byrutgame_genres(&html);
     put(&mut fields, "genre", join_names(&genres));
 
-    let themes = data
-        .get("categories")
-        .and_then(|value| value.as_array())
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(|item| text_field(item, "description").map(str::to_string))
-                .take(6)
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    put(&mut fields, "theme", join_names(&themes));
-
-    if let Some(date) = data
-        .get("release_date")
-        .and_then(|value| text_field(value, "date"))
-    {
-        put(&mut fields, "released", date);
+    if let Some(released) = byrutgame_detail(&html, "Дата выхода") {
+        put(&mut fields, "released", format_russian_date(&released));
+    }
+    if let Some(developer) = byrutgame_detail(&html, "Разработчик") {
+        put(&mut fields, "developer", developer);
+    }
+    if let Some(publisher) = byrutgame_detail(&html, "Издатель") {
+        put(&mut fields, "publisher", publisher);
     }
 
-    let developers = data
-        .get("developers")
-        .and_then(|value| value.as_array())
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(|item| item.as_str().map(str::to_string))
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    put(&mut fields, "developer", join_names(&developers));
-
-    let publishers = data
-        .get("publishers")
-        .and_then(|value| value.as_array())
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(|item| item.as_str().map(str::to_string))
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    put(&mut fields, "publisher", join_names(&publishers));
-
     if fields.is_empty() {
-        Err("в Steam мало данных для подстановки".into())
+        Err("на ByRutGame мало данных для подстановки".into())
     } else {
         Ok(fields)
     }
+}
+
+fn byrutgame_open(title: &str) -> Result<String, String> {
+    let agent = net::agent()?;
+    let search_url = format!(
+        "https://byrutgame.org/index.php?story={}&do=search&subaction=search",
+        net::encode_query(title)
+    );
+    let search = net::browser_agent_get(&agent, &search_url)?;
+    let page_url = byrutgame_best_result(&search, title)
+        .ok_or_else(|| "на ByRutGame ничего не найдено".to_string())?;
+    net::browser_agent_get(&agent, &page_url)
+}
+
+fn byrutgame_best_result(html: &str, title: &str) -> Option<String> {
+    let mut best: Option<(i32, String)> = None;
+    let mut rest = html;
+    while let Some(idx) = rest.find("class=\"search_res\"") {
+        let before = &rest[..idx];
+        let Some(href_at) = before.rfind("href=\"") else {
+            rest = &rest[idx + 10..];
+            continue;
+        };
+        let from = href_at + 6;
+        let Some(to) = before[from..].find('"') else {
+            rest = &rest[idx + 10..];
+            continue;
+        };
+        let href = before[from..from + to].to_string();
+        let after = &rest[idx..];
+        let block_end = after.find("</a>").unwrap_or(after.len().min(2500));
+        let name = extract_attr(&after[..block_end], "alt").unwrap_or_default();
+        if !href.contains("byrutgame.org/") || !href.ends_with(".html") {
+            rest = &rest[idx + 10..];
+            continue;
+        }
+        let score = title_match_score(title, &name);
+        if score >= 400
+            && best
+                .as_ref()
+                .map(|(best_score, _)| score > *best_score)
+                .unwrap_or(true)
+        {
+            best = Some((score, href));
+        }
+        rest = &rest[idx + 10..];
+    }
+    best.map(|(_, url)| url)
+}
+
+fn extract_attr(block: &str, name: &str) -> Option<String> {
+    let marker = format!("{name}=\"");
+    let start = block.find(&marker)? + marker.len();
+    let end = block[start..].find('"')?;
+    let value = strip_html(&block[start..start + end]);
+    if value.is_empty() {
+        None
+    } else {
+        Some(value)
+    }
+}
+
+fn byrutgame_detail(html: &str, label: &str) -> Option<String> {
+    let markers = [
+        format!("ul-details__label\">{label}:</span>"),
+        format!("ul-details__label\">{label}</span>"),
+    ];
+    let idx = markers.iter().find_map(|marker| html.find(marker))?;
+    let after = &html[idx..];
+    let after_label = after.find("</span>")? + "</span>".len();
+    let slice = &after[after_label..];
+    let end = slice.find("</li>").unwrap_or(slice.len().min(500));
+    let raw = strip_html(&slice[..end]);
+    let cleaned = clean_value(raw);
+    if cleaned.is_empty() {
+        None
+    } else {
+        Some(cleaned)
+    }
+}
+
+fn byrutgame_genres(html: &str) -> Vec<String> {
+    let Some(start) = html.find("ulgenre") else {
+        return Vec::new();
+    };
+    let slice = &html[start..];
+    let end = slice.find("</li>").unwrap_or(slice.len().min(1200));
+    let block = &slice[..end];
+    let mut genres = Vec::new();
+    let mut rest = block;
+    while let Some(idx) = rest.find("<a ") {
+        let after = &rest[idx..];
+        let Some(text_start) = after.find('>') else { break };
+        let from = text_start + 1;
+        let Some(text_end) = after[from..].find('<') else { break };
+        let name = strip_html(after[from..from + text_end].trim());
+        if !name.is_empty() {
+            genres.push(name);
+        }
+        rest = &after[from + text_end..];
+    }
+    genres
+}
+
+fn byrutgame_meta(html: &str, name: &str) -> Option<String> {
+    // property="og:description" content="..."  OR name="description" content="..."
+    for attr in ["property", "name"] {
+        let marker = format!("{attr}=\"{name}\"");
+        if let Some(idx) = html.find(&marker) {
+            let window = take_bytes(&html[idx..], 600);
+            if let Some(content) = extract_attr(window, "content") {
+                let cleaned = clean_value(content);
+                if !cleaned.is_empty() {
+                    return Some(cleaned);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn byrutgame_screenshots(html: &str) -> Vec<String> {
+    let mut urls = Vec::new();
+    let mut seen = HashSet::new();
+    let mut rest = html;
+    while let Some(idx) = rest.find("data-lightbox=\"game-screenshots\"") {
+        let before = &rest[..idx];
+        let Some(href_at) = before.rfind("href=") else {
+            rest = &rest[idx + 10..];
+            continue;
+        };
+        let quote = before.as_bytes().get(href_at + 5).copied().unwrap_or(b'"') as char;
+        if quote != '"' && quote != '\'' {
+            rest = &rest[idx + 10..];
+            continue;
+        }
+        let from = href_at + 6;
+        let Some(to) = before[from..].find(quote) else {
+            rest = &rest[idx + 10..];
+            continue;
+        };
+        let url = before[from..from + to].trim();
+        if (url.starts_with("http://") || url.starts_with("https://"))
+            && !url.contains("/thumbs/")
+            && seen.insert(url.to_string())
+        {
+            urls.push(url.to_string());
+        }
+        rest = &rest[idx + 10..];
+    }
+    urls
 }
 
 fn litres(title: &str) -> Result<Fields, String> {
@@ -991,15 +1553,6 @@ fn litres(title: &str) -> Result<Fields, String> {
         }
     }
 
-    if let Some(series) = art
-        .get("series")
-        .and_then(|value| value.as_array())
-        .and_then(|items| items.first())
-        .and_then(|item| text_field(item, "name").or_else(|| text_field(item, "title")))
-    {
-        put(&mut fields, "franchise", series);
-    }
-
     if fields.is_empty() {
         Err("на LitRes мало данных для подстановки".into())
     } else {
@@ -1026,25 +1579,93 @@ mod tests {
     fn formats_shiki_date_rating_duration_style() {
         assert_eq!(format_date("2013-04-07"), "07.04.2013");
         assert_eq!(map_shiki_rating("pg_13"), "PG-13");
-        assert_eq!(map_shiki_rating("r"), "R");
+        assert_eq!(map_shiki_rating("r"), "R-17");
+        assert_eq!(map_shiki_rating("r_plus"), "R+");
         assert_eq!(map_shiki_origin("manga"), "Манга");
         assert_eq!(map_shiki_origin("original"), "Оригинал");
+        assert_eq!(map_anime_kind("tv"), "TV Сериал");
+        assert_eq!(map_anime_kind("movie"), "Фильм");
+        assert_eq!(map_anime_kind("ova"), "OVA");
+    }
+
+    #[test]
+    fn dedupes_genre_labels_case_and_yo() {
+        assert_eq!(
+            dedupe_labels([
+                "Экшен".into(),
+                "экшен".into(),
+                "Сёнен".into(),
+                "Сенен".into(),
+                "Сёнэн".into(),
+            ]),
+            vec![
+                "Экшен".to_string(),
+                "Сёнен".to_string(),
+                "Сёнэн".to_string(),
+            ]
+        );
     }
 
     #[test]
     fn shikimori_fills_origin() {
         let anime = shikimori("animes", "Attack on Titan").expect("shikimori");
         assert_eq!(anime.get("origin").map(String::as_str), Some("Манга"), "{anime:?}");
+        assert_eq!(anime.get("kind").map(String::as_str), Some("TV Сериал"), "{anime:?}");
+        let genre = anime.get("genre").map(String::as_str).unwrap_or("");
+        assert!(genre.contains("Экшен"), "{anime:?}");
+        assert!(
+            genre.contains("Жестокость") || genre.contains("Выживание") || genre.contains("Военное"),
+            "expected shikimori themes in genre: {anime:?}"
+        );
+        assert_eq!(anime.get("country").map(String::as_str), Some("Япония"), "{anime:?}");
     }
 
     #[test]
-    fn lookup_steam_and_shikimori_and_litres() {
-        let game = steam("Hades").expect("steam");
-        assert!(game.contains_key("summary") || game.contains_key("developer"));
+    fn anixart_returns_country() {
+        let country = anixart_country("Naruto").expect("anixart country");
+        assert!(!country.trim().is_empty(), "{country}");
+        assert!(
+            country.to_lowercase().contains("япон") || country.eq_ignore_ascii_case("japan"),
+            "{country}"
+        );
+    }
+
+    #[test]
+    fn anime_frame_from_shikimori_screenshots() {
+        let frame = media_frame("аниме", None, "Naruto").expect("screenshot");
+        assert!(frame.starts_with("https://shikimori.io/system/screenshots/"), "{frame}");
+    }
+
+    #[test]
+    fn byrutgame_frame_from_screenshots() {
+        let frame = media_frame("игры", None, "Hades").expect("byrutgame frame");
+        assert!(frame.starts_with("https://"), "{frame}");
+        assert!(frame.contains("byrutgame.org") || frame.contains("scr"), "{frame}");
+    }
+
+    #[test]
+    fn kinopoisk_frame_from_stills() {
+        let frame = media_frame("кино", None, "1+1 (2011)").expect("kinopoisk frame");
+        assert!(
+            frame.contains("get-kinopoisk-image") && frame.ends_with("/orig"),
+            "{frame}"
+        );
+    }
+
+    #[test]
+    fn lookup_byrutgame_and_shikimori_and_litres() {
+        let game = byrutgame("Hades").expect("byrutgame");
+        assert!(game.contains_key("summary") || game.contains_key("developer"), "{game:?}");
+        assert!(game.get("genre").is_some(), "{game:?}");
         let anime = shikimori("animes", "Naruto").expect("shikimori");
         assert!(anime.contains_key("summary") || anime.contains_key("genre"));
         let book = litres("Мастер и Маргарита").expect("litres");
         assert!(book.contains_key("author") || book.contains_key("summary"));
+    }
+
+    #[test]
+    fn formats_byrutgame_short_month() {
+        assert_eq!(format_russian_date("17 сент. 2020"), "17.09.2020");
     }
 
     #[test]
