@@ -32,7 +32,7 @@ fn add_entry(
     subcategory: Option<String>,
     rating: u8,
     title: String,
-    year: u16,
+    year: Option<u16>,
 ) -> Result<archive::Entry, String> {
     let sub = placement_sub(subcategory);
     let url = source_url
@@ -89,7 +89,7 @@ fn move_entry(
     subcategory: Option<String>,
     rating: u8,
     title: String,
-    year: u16,
+    year: Option<u16>,
 ) -> Result<archive::Entry, String> {
     archive.move_entry(
         &relative_path,

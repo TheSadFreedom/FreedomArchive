@@ -79,12 +79,11 @@ export function AddDialog({
     [category, subcategory, subs.length, rating, rated],
   );
   const year = releaseYear(released);
-  const stem = year && title.trim() ? archiveStem(title.trim(), year) : "";
+  const stem = title.trim() ? archiveStem(title.trim(), year) : "";
   const linkValue = link.trim();
   const usingLink = mode === "link" && linkValue.length > 0;
   const preview = usingLink ? linkValue : sourcePath ? filePreview(sourcePath) : "";
-  const ready =
-    title.trim().length > 0 && year !== null && (usingLink || sourcePath.length > 0);
+  const ready = title.trim().length > 0 && (usingLink || sourcePath.length > 0);
 
   function chooseCategory(id: string) {
     setCategory(id);
@@ -163,10 +162,6 @@ export function AddDialog({
     event.preventDefault();
     const nextTitle = title.trim();
     const nextYear = releaseYear(released);
-    if (!nextYear) {
-      setError("укажите год в дате выхода");
-      return;
-    }
     setError("");
     setBusy(true);
     try {
@@ -205,7 +200,7 @@ export function AddDialog({
             <p className="add-kicker">{place || "Freedom Archive"}</p>
             <h2 id="add-title">Новая запись</h2>
             <p className="editor-path edit-path">
-              {folder}/{stem || "Название (Год)"}
+              {folder}/{stem || "Название"}
             </p>
           </div>
           <button type="button" className="card-icon" aria-label="Закрыть" onClick={onClose}>
@@ -329,7 +324,6 @@ export function AddDialog({
                     value={released}
                     onChange={(event) => setReleased(event.target.value)}
                     placeholder="2024"
-                    required
                   />
                 </label>
               </div>

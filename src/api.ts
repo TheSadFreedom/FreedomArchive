@@ -12,7 +12,7 @@ export function addEntry(args: {
   subcategory: string | null;
   rating: number;
   title: string;
-  year: number;
+  year?: number | null;
 }): Promise<Entry> {
   return invoke<Entry>("add_entry", args);
 }
@@ -34,7 +34,7 @@ export function moveEntry(args: {
   subcategory: string | null;
   rating: number;
   title: string;
-  year: number;
+  year?: number | null;
 }): Promise<Entry> {
   return invoke<Entry>("move_entry", args);
 }

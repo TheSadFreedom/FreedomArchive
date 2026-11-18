@@ -11,15 +11,15 @@ export function releaseYear(raw: string): number | null {
 const FILE_STEM_MAX = 72;
 const FORBIDDEN = /[<>:"/\\|?*\u0000-\u001f]/g;
 
-/** Preview of the archive file stem: `Название (Год)` / `Название... (Год)`. */
-export function fileStem(title: string, year: number): string {
-  const suffix = ` (${year})`;
+/** Preview of the archive file stem: `Название`, `Название (Год)` or truncated with `...`. */
+export function fileStem(title: string, year?: number | null): string {
+  const suffix = year ? ` (${year})` : "";
   const budget = Math.max(1, FILE_STEM_MAX - [...suffix].length);
   let safe = title
     .replace(FORBIDDEN, " ")
     .replace(/\s+/g, " ")
     .replace(/^[\s.]+|[\s.]+$/g, "");
-  if (!safe) return `…${suffix}`;
+  if (!safe) return year ? `…${suffix}` : "…";
   if ([...safe].length <= budget) return `${safe}${suffix}`;
   const take = Math.max(1, budget - 3);
   let cut = [...safe].slice(0, take).join("").replace(/[\s.]+$/g, "");

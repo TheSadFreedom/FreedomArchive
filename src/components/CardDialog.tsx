@@ -299,7 +299,7 @@ export function CardDialog({ entry, entries, onClose, onSaved, onDeleted }: Card
   const fieldDefs = fieldsFor(category, subcategory);
   const rated = usesRating(category);
   const year = releaseYear(fields.released ?? "");
-  const stem = year && title.trim() ? fileStem(title.trim(), year) : "";
+  const stem = title.trim() ? fileStem(title.trim(), year) : "";
   const folder = useMemo(
     () => placement(category, subs.length ? subcategory : null, rated ? rating : 0),
     [category, subcategory, subs.length, rating, rated],
@@ -316,10 +316,6 @@ export function CardDialog({ entry, entries, onClose, onSaved, onDeleted }: Card
     const nextTitle = title.trim();
     const nextReleased = (fields.released ?? "").trim();
     const nextYear = releaseYear(nextReleased);
-    if (!nextYear) {
-      setError("укажите год в дате выхода");
-      return;
-    }
     setError("");
     setBusy(true);
     try {
@@ -416,7 +412,7 @@ export function CardDialog({ entry, entries, onClose, onSaved, onDeleted }: Card
         </header>
 
         <p className="editor-path edit-path">
-          {folder}/{stem || "Название (Год)"}
+          {folder}/{stem || "Название"}
         </p>
 
         <div className="edit-layout">

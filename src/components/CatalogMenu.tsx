@@ -204,10 +204,6 @@ export function MoveDialog({ entry, onClose, onMoved }: MoveDialogProps) {
     event.preventDefault();
     if (same) return;
     const year = releaseYear(entry.fields.released ?? "");
-    if (!year) {
-      setError("у записи нет года в дате выхода");
-      return;
-    }
     setBusy(true);
     setError("");
     try {
@@ -271,10 +267,7 @@ export function MoveDialog({ entry, onClose, onMoved }: MoveDialogProps) {
           </div>
         )}
         <p className="editor-path">
-          {folder}/
-          {releaseYear(entry.fields.released ?? "")
-            ? fileStem(entry.title, releaseYear(entry.fields.released ?? "")!)
-            : entry.title}
+          {folder}/{fileStem(entry.title, releaseYear(entry.fields.released ?? ""))}
         </p>
         {error && <p className="error">{error}</p>}
         <div className="dialog-actions">
