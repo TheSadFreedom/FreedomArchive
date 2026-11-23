@@ -18,13 +18,19 @@ export type Category = {
   subcategories?: Subcategory[];
   fields: FieldDef[];
   rated?: boolean;
+  /** Game tiers F→S instead of star ratings. */
+  tiered?: boolean;
 };
 
 const altTitle: FieldDef = { key: "altTitle", label: "Альтернативное название", kind: "text" };
 
 const released: FieldDef = { key: "released", label: "Дата выхода", kind: "text" };
 
+const playtime: FieldDef = { key: "playtime", label: "Время прохождения", kind: "text" };
+
 const infoFields: FieldDef[] = [altTitle, released];
+
+const gameFields: FieldDef[] = [...infoFields, playtime];
 
 const queueSubs: Subcategory[] = [
   { id: "аниме", title: "Аниме", fields: infoFields },
@@ -37,22 +43,25 @@ const queueSubs: Subcategory[] = [
 
 export const RATINGS = [0, 1, 2, 3, 4, 5] as const;
 
+/** Ascending quality: F < E < D < C < B < A < S. Stored rating is 1…7; 0 = none. */
+export const TIERS = ["F", "E", "D", "C", "B", "A", "S"] as const;
+export type Tier = (typeof TIERS)[number];
+
 export const categories: Category[] = [
   {
     id: "игры",
     title: "Игры",
     rated: false,
+    tiered: true,
     subcategories: [
-      { id: "пройдено", title: "Пройдено" },
-      { id: "брошено", title: "Брошено" },
+      { id: "сюжетные", title: "Сюжетные" },
+      { id: "без сюжета", title: "Без Сюжета" },
       { id: "условно", title: "Условно" },
-      { id: "сыграно", title: "Сыграно" },
-      { id: "мобильные", title: "Мобильные" },
-      { id: "dlc", title: "DLC" },
       { id: "моды", title: "Моды" },
-      { id: "ntfs", title: "NTFS" },
+      { id: "dlc", title: "DLC" },
+      { id: "брошено", title: "Брошено" },
     ],
-    fields: infoFields,
+    fields: gameFields,
   },
   {
     id: "аниме",
@@ -133,9 +142,34 @@ export function ratingLabel(rating: number): string {
   return rating === 0 ? "без оценки" : `${rating} из 5`;
 }
 
+export function tierOf(rating: number): Tier | null {
+  if (rating < 1 || rating > TIERS.length) return null;
+  return TIERS[rating - 1];
+}
+
+export function tierFolder(rating: number): string {
+  return tierOf(rating) ?? "0";
+}
+
+export function tierLabel(rating: number): string {
+  const tier = tierOf(rating);
+  return tier ? `Tier ${tier}` : "без тира";
+}
+
 export function usesRating(categoryId: string | null | undefined): boolean {
   if (!categoryId) return true;
-  return categoryById(categoryId)?.rated !== false;
+  const category = categoryById(categoryId);
+  if (!category || category.tiered) return false;
+  return category.rated !== false;
+}
+
+export function usesTier(categoryId: string | null | undefined): boolean {
+  if (!categoryId) return false;
+  return categoryById(categoryId)?.tiered === true;
+}
+
+export function usesScore(categoryId: string | null | undefined): boolean {
+  return usesRating(categoryId) || usesTier(categoryId);
 }
 
 export function placement(
@@ -144,6 +178,17 @@ export function placement(
   rating: number,
 ): string {
   const parts = [category, subcategory];
-  if (usesRating(category)) parts.push(String(rating));
+  if (usesTier(category)) parts.push(tierFolder(rating));
+  else if (usesRating(category)) parts.push(String(rating));
   return parts.filter((part) => Boolean(part)).join("/");
 }
+
+/** Tier F is always linked to the dropped games shelf. */
+export const GAME_DROPPED_SUB = "брошено";
+export const GAME_TIER_F = 1;
+
+export function isGameNtfs(fields: Record<string, string> | undefined): boolean {
+  return (fields?.ntfs ?? "").trim() === "1";
+}
+
+export type NtfsFilter = "on" | "off" | "only";

@@ -7,76 +7,84 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ScoreKind {
+    None,
+    Stars,
+    Tiers,
+}
+
 struct Shelf {
     id: &'static str,
     subs: &'static [&'static str],
-    rated: bool,
+    score: ScoreKind,
 }
+
+/// Folder names for game tiers. Index is the stored rating: 0 = none, 1 = F … 7 = S.
+const TIER_FOLDERS: &[&str] = &["0", "F", "E", "D", "C", "B", "A", "S"];
 
 const SHELVES: &[Shelf] = &[
     Shelf {
         id: "аниме",
         subs: &["сериалы", "фильмы", "ova", "хентай"],
-        rated: true,
+        score: ScoreKind::Stars,
     },
     Shelf {
         id: "кино",
         subs: &["фильмы", "сериалы"],
-        rated: true,
+        score: ScoreKind::Stars,
     },
     Shelf {
         id: "мульт",
         subs: &["мультфильмы", "мультсериалы"],
-        rated: true,
+        score: ScoreKind::Stars,
     },
     Shelf {
         id: "книги",
         subs: &[],
-        rated: true,
+        score: ScoreKind::Stars,
     },
     Shelf {
         id: "манга",
         subs: &["манга", "хентай"],
-        rated: true,
+        score: ScoreKind::Stars,
     },
     Shelf {
         id: "стендап",
         subs: &[],
-        rated: true,
+        score: ScoreKind::Stars,
     },
     Shelf {
         id: "игры",
         subs: &[
-            "пройдено",
-            "брошено",
+            "сюжетные",
+            "без сюжета",
             "условно",
-            "сыграно",
-            "мобильные",
-            "dlc",
             "моды",
-            "ntfs",
+            "dlc",
+            "брошено",
         ],
-        rated: false,
+        score: ScoreKind::Tiers,
     },
     Shelf {
         id: "планы",
         subs: QUEUE_SUBS,
-        rated: false,
+        score: ScoreKind::None,
     },
     Shelf {
         id: "ожидание",
         subs: QUEUE_SUBS,
-        rated: false,
+        score: ScoreKind::None,
     },
     Shelf {
         id: "пересмотр",
         subs: QUEUE_SUBS,
-        rated: false,
+        score: ScoreKind::None,
     },
     Shelf {
         id: "брошено",
         subs: QUEUE_SUBS,
-        rated: false,
+        score: ScoreKind::None,
     },
 ];
 
@@ -89,17 +97,22 @@ const QUEUE_SUBS: &[&str] = &[
     "книги",
 ];
 
-const GAME_SHELF_MOVES: &[(&str, &str)] = &[
-    ("пройдено", "пройдено"),
-    ("брошено", "брошено"),
-    ("условно", "условно"),
-    ("моды", "моды"),
-    ("android", "мобильные"),
-    ("поиграл", "сыграно"),
-    ("кооп", "сыграно"),
-    ("старые", "сыграно"),
-    ("не-идет", "сыграно"),
+/// Old game shelf → new shelf. Third flag marks migrated cards as NTFS.
+const GAME_SHELF_MOVES: &[(&str, &str, bool)] = &[
+    ("пройдено", "сюжетные", false),
+    ("сыграно", "без сюжета", false),
+    ("поиграл", "без сюжета", false),
+    ("кооп", "без сюжета", false),
+    ("старые", "без сюжета", false),
+    ("не-идет", "без сюжета", false),
+    ("ntfs", "сюжетные", true),
+    ("условно", "условно", false),
+    ("моды", "моды", false),
+    ("dlc", "dlc", false),
+    ("брошено", "брошено", false),
 ];
+
+const GAME_DELETE_SUBS: &[&str] = &["мобильные", "android"];
 
 const IMAGE_EXTENSIONS: &[&str] = &["jpg", "jpeg", "png", "webp", "gif", "bmp", "jfif"];
 const CARDS_DIR: &str = "карточки";
@@ -141,14 +154,8 @@ impl Archive {
     pub fn ensure_tree(&self) -> Result<(), String> {
         for shelf in SHELVES {
             for sub in shelf_leaves(shelf) {
-                if shelf.rated {
-                    for rating in 0..=5 {
-                        let dir = self.leaf(shelf.id, sub, rating)?;
-                        fs::create_dir_all(&dir).map_err(|err| io("не удалось создать папку", err))?;
-                        self.ensure_inside(&dir)?;
-                    }
-                } else {
-                    let dir = self.leaf(shelf.id, sub, 0)?;
+                for rating in score_values(shelf.score) {
+                    let dir = self.leaf(shelf.id, sub, rating)?;
                     fs::create_dir_all(&dir).map_err(|err| io("не удалось создать папку", err))?;
                     self.ensure_inside(&dir)?;
                 }
@@ -166,12 +173,8 @@ impl Archive {
         let mut entries = Vec::new();
         for shelf in SHELVES {
             for sub in shelf_leaves(shelf) {
-                if shelf.rated {
-                    for rating in 0..=5 {
-                        self.collect(shelf.id, sub, rating, &mut entries)?;
-                    }
-                } else {
-                    self.collect(shelf.id, sub, 0, &mut entries)?;
+                for rating in score_values(shelf.score) {
+                    self.collect(shelf.id, sub, rating, &mut entries)?;
                 }
             }
         }
@@ -353,8 +356,9 @@ impl Archive {
         if let Some(sub) = subcategory {
             path = path.join(sub);
         }
-        if shelf_rated(category) {
-            path = path.join(rating.to_string());
+        let kind = shelf_score(category);
+        if kind != ScoreKind::None {
+            path = path.join(score_folder(kind, rating)?);
         }
         Ok(path)
     }
@@ -373,30 +377,157 @@ impl Archive {
         }
         self.ensure_inside(&games)?;
 
-        for (from_sub, to_sub) in GAME_SHELF_MOVES {
+        for (from_sub, to_sub, mark_ntfs) in GAME_SHELF_MOVES {
             let from_sub = *from_sub;
             let to_sub = *to_sub;
+            let mark_ntfs = *mark_ntfs;
+            if from_sub == to_sub {
+                continue;
+            }
             let from_dir = games.join(from_sub);
             if !from_dir.is_dir() {
                 continue;
             }
             self.ensure_inside(&from_dir)?;
-            let dest_dir = games.join(to_sub);
-            fs::create_dir_all(&dest_dir).map_err(|err| io("не удалось создать папку", err))?;
-            self.ensure_inside(&dest_dir)?;
+            let dest_parent = games.join(to_sub);
+            fs::create_dir_all(&dest_parent).map_err(|err| io("не удалось создать папку", err))?;
+            self.ensure_inside(&dest_parent)?;
 
-            for rating in 0..=5 {
-                let rating_dir = from_dir.join(rating.to_string());
-                if !rating_dir.is_dir() {
+            let mut children = Vec::new();
+            let read =
+                fs::read_dir(&from_dir).map_err(|err| io("не удалось прочитать папку", err))?;
+            for item in read {
+                let item = item.map_err(|err| io("не удалось прочитать файл", err))?;
+                children.push(item.path());
+            }
+            children.sort();
+            for path in children {
+                let Ok(meta) = fs::symlink_metadata(&path) else {
+                    continue;
+                };
+                if meta.file_type().is_symlink() || !meta.is_dir() {
                     continue;
                 }
-                self.ensure_inside(&rating_dir)?;
-                self.flatten_rating_dir(&rating_dir, &dest_dir, from_sub, to_sub, rating)?;
-                self.remove_dir_if_empty(&rating_dir)?;
+                let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
+                    continue;
+                };
+                let Some(dest_name) = tier_dest_folder(name) else {
+                    continue;
+                };
+                self.ensure_inside(&path)?;
+                let dest = dest_parent.join(dest_name);
+                fs::create_dir_all(&dest).map_err(|err| io("не удалось создать папку", err))?;
+                self.ensure_inside(&dest)?;
+                let rating = parse_score_folder(ScoreKind::Tiers, dest_name).unwrap_or(0);
+                self.flatten_rating_dir(&path, &dest, from_sub, to_sub, rating, mark_ntfs)?;
+                self.remove_dir_if_empty(&path.join(CARDS_DIR))?;
+                self.remove_dir_if_empty(&path)?;
             }
-            if from_sub != to_sub {
-                self.remove_dir_if_empty(&from_dir)?;
+
+            let dest_zero = dest_parent.join("0");
+            fs::create_dir_all(&dest_zero).map_err(|err| io("не удалось создать папку", err))?;
+            self.ensure_inside(&dest_zero)?;
+            self.flatten_rating_dir(&from_dir, &dest_zero, from_sub, to_sub, 0, mark_ntfs)?;
+            self.remove_dir_if_empty(&from_dir.join(CARDS_DIR))?;
+            self.remove_dir_if_empty(&from_dir)?;
+        }
+
+        for sub in GAME_DELETE_SUBS {
+            let path = games.join(sub);
+            if !path.is_dir() {
+                continue;
             }
+            self.ensure_inside(&path)?;
+            fs::remove_dir_all(&path).map_err(|err| io("не удалось удалить полку игр", err))?;
+        }
+
+        let game_subs = SHELVES
+            .iter()
+            .find(|shelf| shelf.id == "игры")
+            .map(|shelf| shelf.subs)
+            .unwrap_or(&[]);
+        for sub in game_subs {
+            let sub_dir = games.join(sub);
+            if !sub_dir.is_dir() {
+                continue;
+            }
+            self.ensure_inside(&sub_dir)?;
+            if dir_has_loose_images(&sub_dir) {
+                let dest_zero = sub_dir.join("0");
+                fs::create_dir_all(&dest_zero).map_err(|err| io("не удалось создать папку", err))?;
+                self.ensure_inside(&dest_zero)?;
+                self.flatten_rating_dir(&sub_dir, &dest_zero, sub, sub, 0, false)?;
+            }
+            for rating in 1u8..=5 {
+                let from_name = rating.to_string();
+                let Some(dest_name) = tier_dest_folder(&from_name) else {
+                    continue;
+                };
+                if dest_name == from_name {
+                    continue;
+                }
+                let from_path = sub_dir.join(&from_name);
+                if !from_path.is_dir() {
+                    continue;
+                }
+                self.ensure_inside(&from_path)?;
+                let dest = sub_dir.join(dest_name);
+                fs::create_dir_all(&dest).map_err(|err| io("не удалось создать папку", err))?;
+                self.ensure_inside(&dest)?;
+                self.flatten_rating_dir(&from_path, &dest, sub, sub, rating, false)?;
+                self.remove_dir_if_empty(&from_path.join(CARDS_DIR))?;
+                self.remove_dir_if_empty(&from_path)?;
+            }
+        }
+
+        self.force_game_dropped_to_f(&games)?;
+        Ok(())
+    }
+
+    fn force_game_dropped_to_f(&self, games: &Path) -> Result<(), String> {
+        let dropped = games.join("брошено");
+        if !dropped.is_dir() {
+            return Ok(());
+        }
+        self.ensure_inside(&dropped)?;
+        let dest_f = dropped.join("F");
+        fs::create_dir_all(&dest_f).map_err(|err| io("не удалось создать папку", err))?;
+        self.ensure_inside(&dest_f)?;
+
+        if dir_has_loose_images(&dropped) {
+            self.flatten_rating_dir(&dropped, &dest_f, "брошено", "брошено", 1, false)?;
+        }
+
+        let mut children = Vec::new();
+        let read = fs::read_dir(&dropped).map_err(|err| io("не удалось прочитать папку", err))?;
+        for item in read {
+            let item = item.map_err(|err| io("не удалось прочитать файл", err))?;
+            children.push(item.path());
+        }
+        children.sort();
+        for path in children {
+            let Ok(meta) = fs::symlink_metadata(&path) else {
+                continue;
+            };
+            if meta.file_type().is_symlink() || !meta.is_dir() {
+                continue;
+            }
+            let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
+                continue;
+            };
+            if name == "F" || name == CARDS_DIR {
+                continue;
+            }
+            let Some(dest_name) = tier_dest_folder(name) else {
+                continue;
+            };
+            if dest_name == "F" && path == dest_f {
+                continue;
+            }
+            self.ensure_inside(&path)?;
+            self.flatten_rating_dir(&path, &dest_f, "брошено", "брошено", 1, false)?;
+            self.remove_dir_if_empty(&path.join(CARDS_DIR))?;
+            self.remove_dir_if_empty(&path)?;
         }
         Ok(())
     }
@@ -410,7 +541,14 @@ impl Archive {
             if anime_rating.is_dir() {
                 fs::create_dir_all(&dest).map_err(|err| io("не удалось создать папку", err))?;
                 self.ensure_inside(&dest)?;
-                self.flatten_rating_dir(&anime_rating, &dest, "аниме/манга", "манга/манга", rating)?;
+                self.flatten_rating_dir(
+                    &anime_rating,
+                    &dest,
+                    "аниме/манга",
+                    "манга/манга",
+                    rating,
+                    false,
+                )?;
                 self.remove_dir_if_empty(&anime_rating.join(CARDS_DIR))?;
                 self.remove_dir_if_empty(&anime_rating)?;
             }
@@ -418,7 +556,7 @@ impl Archive {
             if loose.is_dir() {
                 fs::create_dir_all(&dest).map_err(|err| io("не удалось создать папку", err))?;
                 self.ensure_inside(&dest)?;
-                self.flatten_rating_dir(&loose, &dest, "манга", "манга/манга", rating)?;
+                self.flatten_rating_dir(&loose, &dest, "манга", "манга/манга", rating, false)?;
                 self.remove_dir_if_empty(&loose.join(CARDS_DIR))?;
                 self.remove_dir_if_empty(&loose)?;
             }
@@ -472,7 +610,7 @@ impl Archive {
             let dest = dest_parent.join(rating.to_string());
             fs::create_dir_all(&dest).map_err(|err| io("не удалось создать папку", err))?;
             self.ensure_inside(&dest)?;
-            self.flatten_rating_dir(&rating_dir, &dest, from_label, to_label, rating)?;
+            self.flatten_rating_dir(&rating_dir, &dest, from_label, to_label, rating, false)?;
             self.remove_dir_if_empty(&rating_dir.join(CARDS_DIR))?;
             self.remove_dir_if_empty(&rating_dir)?;
         }
@@ -486,6 +624,7 @@ impl Archive {
         from_sub: &str,
         to_sub: &str,
         rating: u8,
+        mark_ntfs: bool,
     ) -> Result<(), String> {
         let mut files = Vec::new();
         let read = fs::read_dir(rating_dir).map_err(|err| io("не удалось прочитать папку", err))?;
@@ -536,6 +675,14 @@ impl Archive {
                 if let Err(err) = fs::rename(&source_meta, &dest_meta) {
                     let _ = fs::rename(&dest_image, &path);
                     return Err(io("не удалось перенести карточку", err));
+                }
+            }
+            if mark_ntfs {
+                let mut fields = read_card(&find_card(&dest_image));
+                fields.insert("ntfs".into(), "1".into());
+                if let Err(err) = store_card(&dest_image, &fields) {
+                    let _ = fs::rename(&dest_image, &path);
+                    return Err(err);
                 }
             }
         }
@@ -591,14 +738,10 @@ impl Archive {
             return Err("непонятный путь записи".into());
         }
         let category = parts[0].to_string();
-        let (subcategory, rating) = if shelf_rated(&category) {
+        let kind = shelf_score(&category);
+        let (subcategory, rating) = if kind != ScoreKind::None {
             let rating_text = parts.pop().ok_or_else(|| "в пути нет оценки".to_string())?;
-            let rating: u8 = rating_text
-                .parse()
-                .map_err(|_| "в пути нет оценки".to_string())?;
-            if rating > 5 {
-                return Err("в пути нет оценки".into());
-            }
+            let rating = parse_score_folder(kind, rating_text)?;
             let subcategory = match parts.as_slice() {
                 [cat] if *cat == category.as_str() => None,
                 [cat, sub] if *cat == category.as_str() => Some((*sub).to_string()),
@@ -638,7 +781,11 @@ impl Archive {
         let relative = self.relative_of(image)?;
         let image_path = path_to_string(image)?;
         let fields = read_card(&find_card(image));
-        let rating = if shelf_rated(category) { rating } else { 0 };
+        let rating = if shelf_score(category) != ScoreKind::None {
+            rating
+        } else {
+            0
+        };
         let display = fields
             .get("title")
             .map(String::as_str)
@@ -763,6 +910,23 @@ fn dir_not_empty(err: &std::io::Error) -> bool {
     err.kind() == std::io::ErrorKind::DirectoryNotEmpty || err.raw_os_error() == Some(145)
 }
 
+fn dir_has_loose_images(dir: &Path) -> bool {
+    let Ok(read) = fs::read_dir(dir) else {
+        return false;
+    };
+    for item in read.flatten() {
+        let path = item.path();
+        let Ok(meta) = fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if meta.file_type().is_symlink() || !meta.is_file() || !is_image(&path) {
+            continue;
+        }
+        return true;
+    }
+    false
+}
+
 fn shelf_leaves(shelf: &Shelf) -> Vec<Option<&str>> {
     if shelf.subs.is_empty() {
         vec![None]
@@ -771,12 +935,70 @@ fn shelf_leaves(shelf: &Shelf) -> Vec<Option<&str>> {
     }
 }
 
-fn shelf_rated(category: &str) -> bool {
+fn shelf_score(category: &str) -> ScoreKind {
     SHELVES
         .iter()
         .find(|shelf| shelf.id == category)
-        .map(|shelf| shelf.rated)
-        .unwrap_or(true)
+        .map(|shelf| shelf.score)
+        .unwrap_or(ScoreKind::Stars)
+}
+
+fn score_values(kind: ScoreKind) -> Vec<u8> {
+    match kind {
+        ScoreKind::None => vec![0],
+        ScoreKind::Stars => (0..=5).collect(),
+        ScoreKind::Tiers => (0..TIER_FOLDERS.len() as u8).collect(),
+    }
+}
+
+fn score_folder(kind: ScoreKind, rating: u8) -> Result<String, String> {
+    match kind {
+        ScoreKind::None => Ok(String::new()),
+        ScoreKind::Stars => {
+            if rating > 5 {
+                return Err("оценка от 0 до 5".into());
+            }
+            Ok(rating.to_string())
+        }
+        ScoreKind::Tiers => TIER_FOLDERS
+            .get(rating as usize)
+            .map(|value| (*value).to_string())
+            .ok_or_else(|| "тир от F до S или без оценки".to_string()),
+    }
+}
+
+fn parse_score_folder(kind: ScoreKind, text: &str) -> Result<u8, String> {
+    match kind {
+        ScoreKind::None => Ok(0),
+        ScoreKind::Stars => {
+            let rating: u8 = text
+                .parse()
+                .map_err(|_| "в пути нет оценки".to_string())?;
+            if rating > 5 {
+                return Err("в пути нет оценки".into());
+            }
+            Ok(rating)
+        }
+        ScoreKind::Tiers => TIER_FOLDERS
+            .iter()
+            .position(|folder| *folder == text)
+            .map(|index| index as u8)
+            .ok_or_else(|| "в пути нет тира".to_string()),
+    }
+}
+
+fn tier_dest_folder(name: &str) -> Option<&'static str> {
+    match name {
+        "0" => Some("0"),
+        "1" | "F" => Some("F"),
+        "2" | "E" => Some("E"),
+        "3" | "D" => Some("D"),
+        "4" | "C" => Some("C"),
+        "5" | "B" => Some("B"),
+        "A" => Some("A"),
+        "S" => Some("S"),
+        _ => None,
+    }
 }
 
 fn free_stem(dir: &Path, stem: &str, ext: &str) -> Result<(String, bool), String> {
@@ -799,13 +1021,11 @@ fn stem_taken(dir: &Path, stem: &str, ext: &str) -> bool {
 }
 
 fn check_placement(category: &str, subcategory: Option<&str>, rating: u8) -> Result<(), String> {
-    if rating > 5 {
-        return Err("оценка от 0 до 5".into());
-    }
     let shelf = SHELVES
         .iter()
         .find(|shelf| shelf.id == category)
         .ok_or_else(|| "неизвестная категория".to_string())?;
+    score_folder(shelf.score, rating)?;
     match (shelf.subs.is_empty(), subcategory) {
         (true, None) => Ok(()),
         (true, Some(_)) => Err("у этой категории нет подкатегории".into()),
@@ -1468,13 +1688,17 @@ mod tests {
                 assert!(!archive.root().join(shelf).join(sub).join("0").exists(), "{shelf}/{sub}/0");
             }
         }
-        assert!(archive.root().join("игры/пройдено").is_dir());
-        assert!(archive.root().join("игры/сыграно").is_dir());
-        assert!(archive.root().join("игры/мобильные").is_dir());
-        assert!(archive.root().join("игры/dlc").is_dir());
-        assert!(archive.root().join("игры/моды").is_dir());
-        assert!(archive.root().join("игры/ntfs").is_dir());
-        assert!(!archive.root().join("игры/пройдено/0").exists());
+        assert!(archive.root().join("игры/сюжетные/0").is_dir());
+        assert!(archive.root().join("игры/сюжетные/F").is_dir());
+        assert!(archive.root().join("игры/сюжетные/S").is_dir());
+        assert!(archive.root().join("игры/без сюжета/0").is_dir());
+        assert!(archive.root().join("игры/брошено/F").is_dir());
+        assert!(archive.root().join("игры/dlc/B").is_dir());
+        assert!(archive.root().join("игры/моды/0").is_dir());
+        assert!(!archive.root().join("игры/пройдено").exists());
+        assert!(!archive.root().join("игры/сыграно").exists());
+        assert!(!archive.root().join("игры/мобильные").exists());
+        assert!(!archive.root().join("игры/ntfs").exists());
         assert!(!archive.root().join("игры/android").exists());
         assert!(!archive.root().join("игры/поиграл").exists());
         assert!(!archive.root().join("кинотеатр").exists());
@@ -1711,34 +1935,42 @@ mod tests {
                 archive
                     .root()
                     .join("игры")
-                    .join("пройдено")
+                    .join("сюжетные")
+                    .join("C")
                     .join(format!("{stem}.png")),
                 archive
                     .root()
                     .join("игры")
                     .join("брошено")
+                    .join("F")
                     .join(format!("{stem}.png")),
                 source.clone(),
             ],
         };
 
         let added = archive
-            .add(&source, "игры", Some("пройдено"), 4, &title, Some(2015))
+            .add(&source, "игры", Some("сюжетные"), 4, &title, Some(2015))
             .unwrap();
-        assert_eq!(added.relative_path, format!("игры/пройдено/{stem}.png"));
-        assert_eq!(added.rating, 0);
+        assert_eq!(added.relative_path, format!("игры/сюжетные/C/{stem}.png"));
+        assert_eq!(added.rating, 4);
         let moved = archive
             .move_entry(&added.relative_path, "игры", Some("брошено"), 1, &title, Some(2015))
             .unwrap();
 
-        assert_eq!(moved.rating, 0);
-        assert_eq!(moved.relative_path, format!("игры/брошено/{stem}.png"));
+        assert_eq!(moved.rating, 1);
+        assert_eq!(moved.relative_path, format!("игры/брошено/F/{stem}.png"));
         assert!(moved.image_path.contains("Архив"));
         assert!(!moved.image_path.contains("Коллекции"));
-        assert!(archive.root().join("игры/брошено").join(format!("{stem}.png")).is_file());
-        assert!(!archive.root().join("игры/пройдено").join(format!("{stem}.png")).exists());
-        assert!(!archive.root().join("игры/пройдено/4").exists());
-        assert!(!archive.root().join("игры/брошено/1").exists());
+        assert!(archive
+            .root()
+            .join("игры/брошено/F")
+            .join(format!("{stem}.png"))
+            .is_file());
+        assert!(!archive
+            .root()
+            .join("игры/сюжетные/C")
+            .join(format!("{stem}.png"))
+            .exists());
         assert_eq!(count_files(&collections), before);
 
         drop(_guard);
@@ -1746,7 +1978,7 @@ mod tests {
     }
 
     #[test]
-    fn games_flatten_old_shelves_without_overwriting() {
+    fn games_migrate_to_rating_shelves_without_overwriting() {
         let archive = temp_archive();
         let root = archive.root().to_path_buf();
         let collections = root.join("Коллекции");
@@ -1762,6 +1994,8 @@ mod tests {
         fs::create_dir_all(root.join("игры/android/2")).unwrap();
         fs::write(root.join("игры/android/2/Карман.png"), b"phone").unwrap();
         fs::write(root.join("игры/android/2/Карман.json"), b"{}\n").unwrap();
+        fs::create_dir_all(root.join("игры/мобильные/E")).unwrap();
+        fs::write(root.join("игры/мобильные/E/Стар.png"), b"old-mobile").unwrap();
 
         fs::create_dir_all(root.join("игры/поиграл/0")).unwrap();
         fs::write(root.join("игры/поиграл/0/Одинаковое.png"), b"played").unwrap();
@@ -1772,6 +2006,15 @@ mod tests {
         fs::write(root.join("игры/старые/3/Ретро.png"), b"old").unwrap();
         fs::create_dir_all(root.join("игры/не-идет/4")).unwrap();
         fs::write(root.join("игры/не-идет/4/Тормозит.png"), b"slow").unwrap();
+
+        fs::create_dir_all(root.join("игры/ntfs/0")).unwrap();
+        fs::write(root.join("игры/ntfs/0/Диск.png"), b"disk").unwrap();
+        fs::write(root.join("игры/ntfs/0/Диск.json"), b"{\"summary\":\"ntfs\"}\n").unwrap();
+
+        fs::create_dir_all(root.join("игры/брошено/0")).unwrap();
+        fs::write(root.join("игры/брошено/0/Бросок.png"), b"drop").unwrap();
+        fs::create_dir_all(root.join("игры/брошено/B")).unwrap();
+        fs::write(root.join("игры/брошено/B/Сломал.png"), b"broke").unwrap();
 
         fs::create_dir_all(root.join("игры/моды")).unwrap();
         fs::write(root.join("игры/моды/Уже.png"), b"flat").unwrap();
@@ -1784,57 +2027,91 @@ mod tests {
 
         archive.ensure_tree().unwrap();
 
-        assert_eq!(fs::read(root.join("игры/пройдено/Ведьмак.png")).unwrap(), b"witcher");
-        assert!(fs::read_to_string(root.join("игры/пройдено/карточки/Ведьмак.json")).unwrap().contains("game"));
-        assert_eq!(fs::read(root.join("игры/пройдено/Обложка.jpg")).unwrap(), b"jpg");
-        assert!(fs::read_to_string(root.join("игры/пройдено/карточки/Обложка.json")).unwrap().contains("jpg"));
-        assert!(!root.join("игры/пройдено/Ведьмак.json").exists());
-        assert!(!root.join("игры/пройдено/Обложка.json").exists());
-        assert!(!root.join("игры/пройдено/5").exists());
-        assert!(!root.join("игры/пройдено/0").exists());
+        assert_eq!(fs::read(root.join("игры/сюжетные/B/Ведьмак.png")).unwrap(), b"witcher");
+        assert!(fs::read_to_string(root.join("игры/сюжетные/B/карточки/Ведьмак.json"))
+            .unwrap()
+            .contains("game"));
+        assert_eq!(fs::read(root.join("игры/сюжетные/B/Обложка.jpg")).unwrap(), b"jpg");
+        assert!(!root.join("игры/пройдено").exists());
+        assert!(!root.join("игры/сюжетные/5").exists());
 
-        assert_eq!(fs::read(root.join("игры/мобильные/Карман.png")).unwrap(), b"phone");
-        assert!(root.join("игры/мобильные/карточки/Карман.json").is_file());
-        assert!(!root.join("игры/мобильные/Карман.json").exists());
+        assert!(!root.join("игры/мобильные").exists());
         assert!(!root.join("игры/android").exists());
 
-        assert_eq!(fs::read(root.join("игры/сыграно/Одинаковое.png")).unwrap(), b"played");
-        assert_eq!(fs::read(root.join("игры/сыграно/Одинаковое (2).png")).unwrap(), b"coop");
-        assert!(fs::read_to_string(root.join("игры/сыграно/карточки/Одинаковое (2).json")).unwrap().contains("coop"));
-        assert!(!root.join("игры/сыграно/Одинаковое.json").exists());
-        assert_eq!(fs::read(root.join("игры/сыграно/Ретро.png")).unwrap(), b"old");
-        assert_eq!(fs::read(root.join("игры/сыграно/Тормозит.png")).unwrap(), b"slow");
+        assert_eq!(
+            fs::read(root.join("игры/без сюжета/0/Одинаковое.png")).unwrap(),
+            b"played"
+        );
+        assert_eq!(
+            fs::read(root.join("игры/без сюжета/F/Одинаковое.png")).unwrap(),
+            b"coop"
+        );
+        assert!(fs::read_to_string(root.join("игры/без сюжета/F/карточки/Одинаковое.json"))
+            .unwrap()
+            .contains("coop"));
+        assert_eq!(fs::read(root.join("игры/без сюжета/D/Ретро.png")).unwrap(), b"old");
+        assert_eq!(
+            fs::read(root.join("игры/без сюжета/C/Тормозит.png")).unwrap(),
+            b"slow"
+        );
         assert!(!root.join("игры/поиграл").exists());
-        assert!(!root.join("игры/кооп").exists());
-        assert!(!root.join("игры/старые").exists());
-        assert!(!root.join("игры/не-идет").exists());
+        assert!(!root.join("игры/сыграно").exists());
 
-        assert_eq!(fs::read(root.join("игры/моды/Уже.png")).unwrap(), b"flat");
-        assert_eq!(fs::read(root.join("игры/моды/Уже (2).png")).unwrap(), b"rated");
-        assert!(fs::read_to_string(root.join("игры/моды/карточки/Уже (2).json")).unwrap().contains("mod"));
-        assert!(!root.join("игры/моды/Уже (2).json").exists());
+        assert_eq!(fs::read(root.join("игры/сюжетные/0/Диск.png")).unwrap(), b"disk");
+        assert!(fs::read_to_string(root.join("игры/сюжетные/0/карточки/Диск.json"))
+            .unwrap()
+            .contains("\"ntfs\": \"1\""));
+        assert!(!root.join("игры/ntfs").exists());
+
+        assert_eq!(fs::read(root.join("игры/брошено/F/Бросок.png")).unwrap(), b"drop");
+        assert_eq!(fs::read(root.join("игры/брошено/F/Сломал.png")).unwrap(), b"broke");
+        assert!(!root.join("игры/брошено/0").exists());
+        assert!(!root.join("игры/брошено/B").exists());
+
+        assert_eq!(fs::read(root.join("игры/моды/0/Уже.png")).unwrap(), b"flat");
+        assert_eq!(fs::read(root.join("игры/моды/F/Уже.png")).unwrap(), b"rated");
         assert!(!root.join("игры/моды/1").exists());
 
-        assert!(root.join("игры/dlc").is_dir());
-        assert!(!root.join("игры/dlc/0").exists());
+        assert!(root.join("игры/dlc/0").is_dir());
         assert_eq!(fs::read(root.join("кино/фильмы/2/Фильм.png")).unwrap(), b"film");
-        assert!(!root.join("фильмы").exists());
-        assert_eq!(fs::read(collections.join("игры/пройдено/0/Не трогать.png")).unwrap(), b"keep");
+        assert_eq!(
+            fs::read(collections.join("игры/пройдено/0/Не трогать.png")).unwrap(),
+            b"keep"
+        );
 
         archive.ensure_tree().unwrap();
-        assert!(!root.join("игры/сыграно/Одинаковое (3).png").exists());
-        assert_eq!(fs::read(root.join("игры/пройдено/Ведьмак.png")).unwrap(), b"witcher");
+        assert!(!root.join("игры/без сюжета/0/Одинаковое (2).png").exists());
+        assert_eq!(fs::read(root.join("игры/сюжетные/B/Ведьмак.png")).unwrap(), b"witcher");
 
         let source_dir = root.with_extension("src");
         let source = write_source(&source_dir, "cover.png");
-        let added = archive.add(&source, "игры", Some("dlc"), 5, "Дополнение", Some(2015)).unwrap();
-        assert_eq!(added.relative_path, "игры/dlc/Дополнение (2015).png");
-        assert_eq!(added.rating, 0);
-        assert!(!root.join("игры/dlc/5").exists());
+        let added = archive
+            .add(&source, "игры", Some("dlc"), 5, "Дополнение", Some(2015))
+            .unwrap();
+        assert_eq!(added.relative_path, "игры/dlc/B/Дополнение (2015).png");
+        assert_eq!(added.rating, 5);
         let listed = archive.list().unwrap();
-        assert!(listed.iter().any(|entry| entry.relative_path == "игры/dlc/Дополнение (2015).png" && entry.rating == 0));
-        assert!(listed.iter().any(|entry| entry.title == "Ведьмак" && entry.subcategory.as_deref() == Some("пройдено") && entry.rating == 0));
-        assert!(archive.add(&source, "игры", Some("android"), 1, "Нет", Some(2015)).is_err());
+        assert!(listed.iter().any(|entry| {
+            entry.relative_path == "игры/dlc/B/Дополнение (2015).png" && entry.rating == 5
+        }));
+        assert!(listed.iter().any(|entry| {
+            entry.title == "Ведьмак"
+                && entry.subcategory.as_deref() == Some("сюжетные")
+                && entry.rating == 5
+        }));
+        assert!(listed.iter().any(|entry| {
+            entry.title == "Диск"
+                && entry.subcategory.as_deref() == Some("сюжетные")
+                && entry.fields.get("ntfs").map(String::as_str) == Some("1")
+        }));
+        assert!(listed.iter().any(|entry| {
+            entry.title == "Бросок"
+                && entry.subcategory.as_deref() == Some("брошено")
+                && entry.rating == 1
+        }));
+        assert!(archive
+            .add(&source, "игры", Some("android"), 1, "Нет", Some(2015))
+            .is_err());
 
         let _ = fs::remove_dir_all(archive.root());
         let _ = fs::remove_dir_all(source_dir);

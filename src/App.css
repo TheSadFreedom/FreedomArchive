@@ -1036,8 +1036,8 @@ h1 {
   filter: drop-shadow(0 0 6px rgba(214, 255, 74, 0.35));
 }
 
+.poster-tier-chip,
 .poster-year-chip {
-  margin-left: auto;
   padding: 0.3rem 0.52rem;
   border-radius: 999px;
   background: rgba(8, 9, 10, 0.58);
@@ -1048,6 +1048,18 @@ h1 {
   letter-spacing: 0.06em;
   backdrop-filter: blur(12px) saturate(1.2);
   box-shadow: 0 8px 20px rgba(0, 0, 0, 0.28);
+}
+
+.poster-tier-chip {
+  min-width: 1.55rem;
+  text-align: center;
+  color: var(--accent);
+  font-size: 0.78rem;
+  letter-spacing: 0.04em;
+}
+
+.poster-year-chip {
+  margin-left: auto;
 }
 
 .poster-meta {
@@ -1737,6 +1749,95 @@ h1 {
 
 .add-score {
   width: 100%;
+}
+
+.tiers {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.28rem;
+  flex-wrap: wrap;
+  justify-content: center;
+  width: 100%;
+}
+
+.tiers .tier {
+  min-width: 2rem;
+  height: 2rem;
+  padding: 0 0.45rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 0.55rem;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(255, 255, 255, 0.04);
+  color: rgba(243, 241, 236, 0.55);
+  font-size: 0.82rem;
+  font-weight: 720;
+  letter-spacing: 0.04em;
+}
+
+.tiers .tier.on {
+  color: #12110f;
+  background: var(--accent);
+  border-color: transparent;
+  box-shadow: 0 0 0 1px rgba(214, 255, 74, 0.25);
+}
+
+.tiers.pick .tier {
+  cursor: pointer;
+  transition:
+    transform 0.12s ease,
+    background 0.12s ease,
+    color 0.12s ease;
+}
+
+.tiers.pick .tier:hover {
+  transform: translateY(-1px);
+  color: rgba(243, 241, 236, 0.92);
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.tiers.pick .tier.on:hover {
+  color: #12110f;
+  background: var(--accent);
+}
+
+.tiers.locked {
+  opacity: 0.85;
+}
+
+.tiers.locked .tier:not(.on) {
+  opacity: 0.35;
+}
+
+.add-score .tiers.pick,
+.add-score .tiers.locked {
+  display: flex !important;
+  justify-content: space-between;
+  gap: 0.28rem;
+}
+
+.add-score .tiers.pick .tier,
+.add-score .tiers.locked .tier {
+  flex: 1;
+}
+
+.add-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.55rem;
+  margin-top: 0.35rem;
+  color: var(--text);
+  font-size: 0.92rem;
+  font-weight: 600;
+  cursor: pointer;
+  user-select: none;
+}
+
+.add-check input {
+  width: 1.05rem;
+  height: 1.05rem;
+  accent-color: var(--accent);
 }
 
 .add-score .stars.pick {

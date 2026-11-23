@@ -5,7 +5,16 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { addEntry, errorText, updateCard } from "../api";
 import { PlacementPicker } from "./PlacementPicker";
 import { Stars } from "./Stars";
-import { categories, categoryById, placement, usesRating } from "../schema/categories";
+import { TierPicker } from "./TierPicker";
+import {
+  categories,
+  categoryById,
+  GAME_DROPPED_SUB,
+  GAME_TIER_F,
+  placement,
+  usesRating,
+  usesTier,
+} from "../schema/categories";
 import type { Entry } from "../types";
 import { fileStem as archiveStem, releaseYear } from "../title";
 
@@ -57,13 +66,21 @@ export function AddDialog({
   const [title, setTitle] = useState("");
   const [altTitle, setAltTitle] = useState("");
   const [released, setReleased] = useState("");
+  const [playtime, setPlaytime] = useState("");
+  const [ntfs, setNtfs] = useState(false);
   const [category, setCategory] = useState(start.id);
   const [subcategory, setSubcategory] = useState(
     initialSubcategory && start.subcategories?.some((item) => item.id === initialSubcategory)
       ? initialSubcategory
       : (start.subcategories?.[0].id ?? ""),
   );
-  const [rating, setRating] = useState(0);
+  const [rating, setRating] = useState(() =>
+    start.id === "игры" &&
+    (initialSubcategory === GAME_DROPPED_SUB ||
+      (!initialSubcategory && start.subcategories?.[0].id === GAME_DROPPED_SUB))
+      ? GAME_TIER_F
+      : 0,
+  );
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [dragging, setDragging] = useState(false);
@@ -71,12 +88,15 @@ export function AddDialog({
   const current = categoryById(category);
   const subs = current?.subcategories ?? [];
   const rated = usesRating(category);
+  const tiered = usesTier(category);
+  const scored = rated || tiered;
+  const droppedLocked = category === "игры" && subcategory === GAME_DROPPED_SUB;
   const place = [current?.title, subs.find((item) => item.id === subcategory)?.title]
     .filter(Boolean)
     .join(" · ");
   const folder = useMemo(
-    () => placement(category, subs.length ? subcategory || null : null, rated ? rating : 0),
-    [category, subcategory, subs.length, rating, rated],
+    () => placement(category, subs.length ? subcategory || null : null, scored ? rating : 0),
+    [category, subcategory, subs.length, rating, scored],
   );
   const year = releaseYear(released);
   const stem = title.trim() ? archiveStem(title.trim(), year) : "";
@@ -88,7 +108,27 @@ export function AddDialog({
   function chooseCategory(id: string) {
     setCategory(id);
     const next = categoryById(id);
-    setSubcategory(next?.subcategories?.[0].id ?? "");
+    const nextSub = next?.subcategories?.[0].id ?? "";
+    setSubcategory(nextSub);
+    if (id === "игры" && nextSub === GAME_DROPPED_SUB) setRating(GAME_TIER_F);
+    else if (usesTier(id)) setRating((value) => (value === GAME_TIER_F ? 0 : Math.min(7, value)));
+    else if (usesRating(id)) setRating((value) => Math.min(5, value));
+    else setRating(0);
+    if (id !== "игры") setNtfs(false);
+  }
+
+  function chooseSubcategory(id: string) {
+    setSubcategory(id);
+    if (category === "игры" && id === GAME_DROPPED_SUB) setRating(GAME_TIER_F);
+  }
+
+  function chooseTier(value: number) {
+    if (category === "игры" && value === GAME_TIER_F) {
+      setSubcategory(GAME_DROPPED_SUB);
+      setRating(GAME_TIER_F);
+      return;
+    }
+    setRating(value);
   }
 
   function takeFile(path: string) {
@@ -165,20 +205,31 @@ export function AddDialog({
     setError("");
     setBusy(true);
     try {
+      let nextSub = subs.length ? subcategory || null : null;
+      let nextRating = scored ? rating : 0;
+      if (category === "игры") {
+        if (nextRating === GAME_TIER_F) nextSub = GAME_DROPPED_SUB;
+        if (nextSub === GAME_DROPPED_SUB) nextRating = GAME_TIER_F;
+      }
       let entry = await addEntry({
         sourcePath: usingLink ? undefined : sourcePath,
         sourceUrl: usingLink ? linkValue : undefined,
         category,
-        subcategory: subs.length ? subcategory || null : null,
-        rating: rated ? rating : 0,
+        subcategory: nextSub,
+        rating: nextRating,
         title: nextTitle,
         year: nextYear,
       });
-      entry = await updateCard(entry.relativePath, {
+      const card: Record<string, string> = {
         title: nextTitle,
         altTitle: altTitle.trim(),
         released: released.trim(),
-      });
+      };
+      if (category === "игры") {
+        card.playtime = playtime.trim();
+        card.ntfs = ntfs ? "1" : "";
+      }
+      entry = await updateCard(entry.relativePath, card);
       await onAdded(entry);
     } catch (caught) {
       setError(errorText(caught));
@@ -259,6 +310,15 @@ export function AddDialog({
                 <Stars value={rating} onChange={setRating} />
               </div>
             )}
+            {tiered && (
+              <div className="add-score">
+                <TierPicker
+                  value={rating}
+                  onChange={droppedLocked ? undefined : chooseTier}
+                  locked={droppedLocked}
+                />
+              </div>
+            )}
 
             <div className="add-source">
               <div className="place-subs add-modes-bar" role="group" aria-label="Источник обложки">
@@ -327,6 +387,26 @@ export function AddDialog({
                   />
                 </label>
               </div>
+              {category === "игры" && (
+                <>
+                  <label className="add-field">
+                    <span className="editor-label">Время прохождения</span>
+                    <input
+                      value={playtime}
+                      onChange={(event) => setPlaytime(event.target.value)}
+                      placeholder="например 40 ч"
+                    />
+                  </label>
+                  <label className="add-check">
+                    <input
+                      type="checkbox"
+                      checked={ntfs}
+                      onChange={(event) => setNtfs(event.target.checked)}
+                    />
+                    <span>NTFS</span>
+                  </label>
+                </>
+              )}
             </section>
 
             <section className="add-sheet">
@@ -335,7 +415,7 @@ export function AddDialog({
                 category={category}
                 subcategory={subcategory}
                 onCategory={chooseCategory}
-                onSubcategory={setSubcategory}
+                onSubcategory={chooseSubcategory}
               />
             </section>
           </div>

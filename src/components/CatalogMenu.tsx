@@ -2,7 +2,16 @@ import { convertFileSrc } from "@tauri-apps/api/core";
 import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { deleteEntry, errorText, moveEntry } from "../api";
 import { Stars } from "./Stars";
-import { categories, categoryById, placement, usesRating } from "../schema/categories";
+import { TierPicker } from "./TierPicker";
+import {
+  categories,
+  categoryById,
+  GAME_DROPPED_SUB,
+  GAME_TIER_F,
+  placement,
+  usesRating,
+  usesTier,
+} from "../schema/categories";
 import { displayTitle, fileStem, releaseYear } from "../title";
 import type { Entry } from "../types";
 
@@ -172,8 +181,15 @@ export function MoveDialog({ entry, onClose, onMoved }: MoveDialogProps) {
   const current = categoryById(category);
   const subs = current?.subcategories ?? [];
   const rated = usesRating(category);
-  const nextSub = subs.length ? subcategory || subs[0]?.id || null : null;
-  const nextRating = rated ? rating : 0;
+  const tiered = usesTier(category);
+  const scored = rated || tiered;
+  let nextSub = subs.length ? subcategory || subs[0]?.id || null : null;
+  let nextRating = scored ? rating : 0;
+  if (category === "игры") {
+    if (nextRating === GAME_TIER_F) nextSub = GAME_DROPPED_SUB;
+    if (nextSub === GAME_DROPPED_SUB) nextRating = GAME_TIER_F;
+  }
+  const droppedLocked = category === "игры" && nextSub === GAME_DROPPED_SUB;
   const same =
     category === entry.category &&
     nextSub === (entry.subcategory ?? null) &&
@@ -196,8 +212,26 @@ export function MoveDialog({ entry, onClose, onMoved }: MoveDialogProps) {
   function chooseCategory(id: string) {
     setCategory(id);
     const next = categoryById(id);
-    setSubcategory(next?.subcategories?.[0]?.id ?? "");
-    if (!usesRating(id)) setRating(0);
+    const nextSub = next?.subcategories?.[0]?.id ?? "";
+    setSubcategory(nextSub);
+    if (id === "игры" && nextSub === GAME_DROPPED_SUB) setRating(GAME_TIER_F);
+    else if (usesTier(id)) setRating((value) => (value === GAME_TIER_F ? 0 : Math.min(7, value)));
+    else if (usesRating(id)) setRating((value) => Math.min(5, value));
+    else setRating(0);
+  }
+
+  function chooseSubcategory(id: string) {
+    setSubcategory(id);
+    if (category === "игры" && id === GAME_DROPPED_SUB) setRating(GAME_TIER_F);
+  }
+
+  function chooseTier(value: number) {
+    if (category === "игры" && value === GAME_TIER_F) {
+      setSubcategory(GAME_DROPPED_SUB);
+      setRating(GAME_TIER_F);
+      return;
+    }
+    setRating(value);
   }
 
   async function submit(event: FormEvent) {
@@ -251,7 +285,7 @@ export function MoveDialog({ entry, onClose, onMoved }: MoveDialogProps) {
         {subs.length > 0 && (
           <label>
             <span className="editor-label">Подкатегория</span>
-            <select value={subcategory} onChange={(event) => setSubcategory(event.target.value)}>
+            <select value={subcategory} onChange={(event) => chooseSubcategory(event.target.value)}>
               {subs.map((item) => (
                 <option key={item.id} value={item.id}>
                   {item.title}
@@ -264,6 +298,16 @@ export function MoveDialog({ entry, onClose, onMoved }: MoveDialogProps) {
           <div>
             <p className="editor-label">Оценка</p>
             <Stars value={rating} onChange={setRating} />
+          </div>
+        )}
+        {tiered && (
+          <div>
+            <p className="editor-label">Tier</p>
+            <TierPicker
+              value={rating}
+              onChange={droppedLocked ? undefined : chooseTier}
+              locked={droppedLocked}
+            />
           </div>
         )}
         <p className="editor-path">

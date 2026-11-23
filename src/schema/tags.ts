@@ -142,7 +142,9 @@ export function collectFacets(
         field.key !== "summary" &&
         field.key !== "altTitle" &&
         field.key !== "episodes" &&
-        field.key !== "duration",
+        field.key !== "duration" &&
+        field.key !== "playtime" &&
+        field.key !== "ntfs",
     )
     .map((field) => ({
       key: field.key,

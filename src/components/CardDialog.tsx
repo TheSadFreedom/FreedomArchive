@@ -3,11 +3,16 @@ import { deleteEntry, errorText, moveEntry, updateCard } from "../api";
 import { Cover } from "./Cover";
 import { PlacementPicker } from "./PlacementPicker";
 import { Stars } from "./Stars";
+import { TierPicker } from "./TierPicker";
 import {
   categoryById,
   fieldsFor,
+  GAME_DROPPED_SUB,
+  GAME_TIER_F,
+  isGameNtfs,
   placement,
   usesRating,
+  usesTier,
   type FieldDef,
 } from "../schema/categories";
 import type { Entry } from "../types";
@@ -298,17 +303,46 @@ export function CardDialog({ entry, entries, onClose, onSaved, onDeleted }: Card
   const subs = current?.subcategories ?? [];
   const fieldDefs = fieldsFor(category, subcategory);
   const rated = usesRating(category);
+  const tiered = usesTier(category);
+  const scored = rated || tiered;
+  const droppedLocked = category === "игры" && subcategory === GAME_DROPPED_SUB;
   const year = releaseYear(fields.released ?? "");
   const stem = title.trim() ? fileStem(title.trim(), year) : "";
   const folder = useMemo(
-    () => placement(category, subs.length ? subcategory : null, rated ? rating : 0),
-    [category, subcategory, subs.length, rating, rated],
+    () => placement(category, subs.length ? subcategory : null, scored ? rating : 0),
+    [category, subcategory, subs.length, rating, scored],
   );
 
   function chooseCategory(id: string) {
     setCategory(id);
     const next = categoryById(id);
-    setSubcategory(next?.subcategories?.[0].id ?? "");
+    const nextSub = next?.subcategories?.[0].id ?? "";
+    setSubcategory(nextSub);
+    if (id === "игры" && nextSub === GAME_DROPPED_SUB) setRating(GAME_TIER_F);
+    else if (usesTier(id)) setRating((value) => (value === GAME_TIER_F ? 0 : Math.min(7, value)));
+    else if (usesRating(id)) setRating((value) => Math.min(5, value));
+    else setRating(0);
+    if (id !== "игры") {
+      setFields((currentFields) => {
+        const next = { ...currentFields };
+        delete next.ntfs;
+        return next;
+      });
+    }
+  }
+
+  function chooseSubcategory(id: string) {
+    setSubcategory(id);
+    if (category === "игры" && id === GAME_DROPPED_SUB) setRating(GAME_TIER_F);
+  }
+
+  function chooseTier(value: number) {
+    if (category === "игры" && value === GAME_TIER_F) {
+      setSubcategory(GAME_DROPPED_SUB);
+      setRating(GAME_TIER_F);
+      return;
+    }
+    setRating(value);
   }
 
   async function save(event: FormEvent) {
@@ -319,8 +353,12 @@ export function CardDialog({ entry, entries, onClose, onSaved, onDeleted }: Card
     setError("");
     setBusy(true);
     try {
-      const nextSub = subs.length && subcategory ? subcategory : null;
-      const nextRating = rated ? rating : 0;
+      let nextSub = subs.length && subcategory ? subcategory : null;
+      let nextRating = scored ? rating : 0;
+      if (category === "игры") {
+        if (nextRating === GAME_TIER_F) nextSub = GAME_DROPPED_SUB;
+        if (nextSub === GAME_DROPPED_SUB) nextRating = GAME_TIER_F;
+      }
       const nextStem = fileStem(nextTitle, nextYear);
       const currentFile = entry.relativePath.split("/").pop() ?? "";
       const currentStem = currentFile.replace(/\.[^.]+$/, "");
@@ -348,6 +386,9 @@ export function CardDialog({ entry, entries, onClose, onSaved, onDeleted }: Card
         payload[field.key] = fields[field.key] ?? "";
       }
       payload.released = nextReleased;
+      if (category === "игры") {
+        payload.ntfs = isGameNtfs(fields) ? "1" : "";
+      }
       await updateCard(relativePath, payload);
       await onSaved(relativePath);
     } catch (caught) {
@@ -425,6 +466,15 @@ export function CardDialog({ entry, entries, onClose, onSaved, onDeleted }: Card
                 <Stars value={rating} onChange={setRating} />
               </div>
             )}
+            {tiered && (
+              <div className="add-score">
+                <TierPicker
+                  value={rating}
+                  onChange={droppedLocked ? undefined : chooseTier}
+                  locked={droppedLocked}
+                />
+              </div>
+            )}
           </div>
 
           <div className="edit-fields">
@@ -472,12 +522,28 @@ export function CardDialog({ entry, entries, onClose, onSaved, onDeleted }: Card
               />
             ))}
 
-            {!focused && (
+            {category === "игры" && (
+              <label className="add-check">
+                <input
+                  type="checkbox"
+                  checked={isGameNtfs(fields)}
+                  onChange={(event) =>
+                    setFields((currentFields) => ({
+                      ...currentFields,
+                      ntfs: event.target.checked ? "1" : "",
+                    }))
+                  }
+                />
+                <span>NTFS</span>
+              </label>
+            )}
+
+            {(!focused || category === "игры") && (
               <PlacementPicker
                 category={category}
                 subcategory={subcategory}
                 onCategory={chooseCategory}
-                onSubcategory={setSubcategory}
+                onSubcategory={chooseSubcategory}
               />
             )}
           </div>

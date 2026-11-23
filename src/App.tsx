@@ -10,7 +10,12 @@ import { HomeDrift } from "./components/HomeDrift";
 import {
   categories,
   categoryById,
+  isGameNtfs,
+  tierOf,
   usesRating,
+  usesScore,
+  usesTier,
+  type NtfsFilter,
 } from "./schema/categories";
 import {
   compareEntries,
@@ -52,6 +57,7 @@ export default function App() {
   const [subcategory, setSubcategory] = useState("");
   const [sortKey, setSortKey] = useState<SortKey>("title");
   const [sortDir, setSortDir] = useState<SortDir>("asc");
+  const [ntfsFilter, setNtfsFilter] = useState<NtfsFilter>("on");
 
   const reload = useCallback(async (nextPath?: string) => {
     const next = await listEntries();
@@ -116,8 +122,15 @@ export default function App() {
 
   const categoryEntries = useMemo(() => {
     if (!current) return [];
-    return entries.filter((entry) => entry.category === current.id);
-  }, [entries, current]);
+    let list = entries.filter((entry) => entry.category === current.id);
+    if (current.id === "игры" && ntfsFilter !== "on") {
+      list = list.filter((entry) => {
+        const flagged = isGameNtfs(entry.fields);
+        return ntfsFilter === "only" ? flagged : !flagged;
+      });
+    }
+    return list;
+  }, [entries, current, ntfsFilter]);
 
   const subCounts = useMemo(() => {
     const map = new Map<string, number>();
@@ -135,11 +148,13 @@ export default function App() {
     return filtered.slice().sort((left, right) => compareEntries(left, right, sortKey, sortDir));
   }, [categoryEntries, filterSub, sortKey, sortDir]);
 
-  const showRatingSort = !current || usesRating(current.id);
+  const showRatingSort = !current || usesScore(current.id);
   const sortOptions: { key: SortKey; label: string }[] = [
     { key: "title", label: "Название" },
     { key: "released", label: "Дата" },
-    ...(showRatingSort ? [{ key: "rating" as const, label: "Оценка" }] : []),
+    ...(showRatingSort
+      ? [{ key: "rating" as const, label: current && usesTier(current.id) ? "Tier" : "Оценка" }]
+      : []),
   ];
 
   useEffect(() => {
@@ -209,7 +224,7 @@ export default function App() {
   function openCategory(id: string) {
     setCategoryId(id);
     setSubcategory(categoryById(id)?.subcategories?.[0]?.id ?? "");
-    if (usesRating(id)) {
+    if (usesScore(id)) {
       setSortKey("rating");
       setSortDir("desc");
     } else {
@@ -234,6 +249,8 @@ export default function App() {
     const released = entry.fields.released?.trim() ?? "";
     const year = releaseYear(released);
     const rated = usesRating(entry.category);
+    const tiered = usesTier(entry.category);
+    const tier = tiered ? tierOf(entry.rating) : null;
     return (
       <button
         type="button"
@@ -246,7 +263,7 @@ export default function App() {
         <span className="poster-frame">
           <Cover lazy imagePath={entry.imagePath} title={displayTitle(entry.title)} />
           <span className="poster-shade" aria-hidden="true" />
-          {(rated || year) && (
+          {(rated || tier || year) && (
             <span className="poster-overlay">
               {rated && entry.rating > 0 && (
                 <span className="poster-stars" aria-label={`${entry.rating} из 5`}>
@@ -263,6 +280,11 @@ export default function App() {
                       />
                     </svg>
                   ))}
+                </span>
+              )}
+              {tier && (
+                <span className="poster-tier-chip" aria-label={`Tier ${tier}`}>
+                  {tier}
                 </span>
               )}
               {year && <span className="poster-year-chip">{year}</span>}
@@ -370,6 +392,27 @@ export default function App() {
                     >
                       {item.title}
                       <span className="catalog-sub-qty">{subCounts.get(item.id) ?? 0}</span>
+                    </button>
+                  ))}
+                </div>
+              )}
+              {current.id === "игры" && (
+                <div className="catalog-sort" role="group" aria-label="Показывать NTFS">
+                  {(
+                    [
+                      ["on", "NTFS вкл"],
+                      ["off", "NTFS выкл"],
+                      ["only", "только NTFS"],
+                    ] as const
+                  ).map(([mode, label]) => (
+                    <button
+                      key={mode}
+                      type="button"
+                      className={ntfsFilter === mode ? "catalog-sort-btn on" : "catalog-sort-btn"}
+                      aria-pressed={ntfsFilter === mode}
+                      onClick={() => setNtfsFilter(mode)}
+                    >
+                      {label}
                     </button>
                   ))}
                 </div>
